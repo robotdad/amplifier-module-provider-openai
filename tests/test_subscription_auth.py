@@ -170,3 +170,134 @@ class TestMountSubscription:
         assert provider._auth_mode == "subscription", (
             f"Expected _auth_mode='subscription', got '{provider._auth_mode}'"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestClientConstruction — task-12
+# ---------------------------------------------------------------------------
+
+
+class TestClientConstruction:
+    """Tests for the conditional client property (api_key vs subscription mode)."""
+
+    def _make_subscription_provider(
+        self,
+        access_token: str | None = "test-access-token",
+        account_id: str | None = "user-123",
+    ) -> OpenAIProvider:
+        """Return a provider configured for subscription auth mode."""
+        provider = OpenAIProvider(
+            config={"auth_mode": "subscription", "max_retries": 0}
+        )
+        provider._access_token = access_token
+        provider._account_id = account_id
+        return provider
+
+    def test_subscription_client_uses_chatgpt_base_url(self):
+        """Subscription client must use CHATGPT_CODEX_BASE_URL as base_url."""
+        from amplifier_module_provider_openai import oauth
+        from unittest.mock import MagicMock, patch
+
+        provider = self._make_subscription_provider()
+        mock_client = MagicMock()
+
+        with patch(
+            "amplifier_module_provider_openai.AsyncOpenAI", return_value=mock_client
+        ) as mock_cls:
+            _ = provider.client
+
+        mock_cls.assert_called_once()
+        call_kwargs = mock_cls.call_args.kwargs
+        assert call_kwargs["base_url"] == oauth.CHATGPT_CODEX_BASE_URL, (
+            f"Expected base_url={oauth.CHATGPT_CODEX_BASE_URL!r}, "
+            f"got {call_kwargs.get('base_url')!r}"
+        )
+
+    def test_subscription_client_sends_chatgpt_account_id_header(self):
+        """Subscription client must include ChatGPT-Account-Id in default_headers."""
+        from unittest.mock import MagicMock, patch
+
+        provider = self._make_subscription_provider(account_id="user-abc")
+        mock_client = MagicMock()
+
+        with patch(
+            "amplifier_module_provider_openai.AsyncOpenAI", return_value=mock_client
+        ) as mock_cls:
+            _ = provider.client
+
+        call_kwargs = mock_cls.call_args.kwargs
+        headers = call_kwargs.get("default_headers", {})
+        assert headers.get("ChatGPT-Account-Id") == "user-abc", (
+            f"Expected ChatGPT-Account-Id='user-abc', "
+            f"got {headers.get('ChatGPT-Account-Id')!r}"
+        )
+
+    def test_subscription_client_account_id_empty_when_none(self):
+        """Subscription client uses empty string for ChatGPT-Account-Id when account_id is None."""
+        from unittest.mock import MagicMock, patch
+
+        provider = self._make_subscription_provider(account_id=None)
+        mock_client = MagicMock()
+
+        with patch(
+            "amplifier_module_provider_openai.AsyncOpenAI", return_value=mock_client
+        ) as mock_cls:
+            _ = provider.client
+
+        call_kwargs = mock_cls.call_args.kwargs
+        headers = call_kwargs.get("default_headers", {})
+        assert headers.get("ChatGPT-Account-Id") == "", (
+            f"Expected ChatGPT-Account-Id='', got {headers.get('ChatGPT-Account-Id')!r}"
+        )
+
+    def test_subscription_client_uses_access_token_as_api_key(self):
+        """Subscription client must use _access_token as the api_key."""
+        from unittest.mock import MagicMock, patch
+
+        provider = self._make_subscription_provider(access_token="my-oauth-token")
+        mock_client = MagicMock()
+
+        with patch(
+            "amplifier_module_provider_openai.AsyncOpenAI", return_value=mock_client
+        ) as mock_cls:
+            _ = provider.client
+
+        call_kwargs = mock_cls.call_args.kwargs
+        assert call_kwargs["api_key"] == "my-oauth-token", (
+            f"Expected api_key='my-oauth-token', got {call_kwargs.get('api_key')!r}"
+        )
+
+    def test_subscription_client_raises_if_no_access_token(self):
+        """Subscription mode must raise ValueError when _access_token is not set."""
+        import pytest as _pytest
+
+        provider = self._make_subscription_provider(access_token=None)
+
+        with _pytest.raises(ValueError, match="access_token"):
+            _ = provider.client
+
+    def test_api_key_client_uses_api_key(self):
+        """API key client must pass _api_key as api_key (existing behavior unchanged)."""
+        from unittest.mock import MagicMock, patch
+
+        provider = OpenAIProvider(api_key="sk-test-key", config={"max_retries": 0})
+        mock_client = MagicMock()
+
+        with patch(
+            "amplifier_module_provider_openai.AsyncOpenAI", return_value=mock_client
+        ) as mock_cls:
+            _ = provider.client
+
+        call_kwargs = mock_cls.call_args.kwargs
+        assert call_kwargs["api_key"] == "sk-test-key", (
+            f"Expected api_key='sk-test-key', got {call_kwargs.get('api_key')!r}"
+        )
+
+    def test_api_key_client_raises_without_api_key(self):
+        """API key mode must raise ValueError when _api_key is not set (existing behavior)."""
+        import pytest as _pytest
+
+        provider = OpenAIProvider(config={"max_retries": 0})  # No api_key
+
+        with _pytest.raises(ValueError):
+            _ = provider.client

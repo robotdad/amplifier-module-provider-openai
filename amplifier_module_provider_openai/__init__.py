@@ -228,11 +228,23 @@ class OpenAIProvider:
     def client(self) -> AsyncOpenAI:
         """Lazily initialize the OpenAI client on first access."""
         if self._client is None:
-            if self._api_key is None:
-                raise ValueError("api_key or client must be provided for API calls")
-            self._client = AsyncOpenAI(
-                api_key=self._api_key, base_url=self.base_url, max_retries=0
-            )
+            if self._auth_mode == "subscription":
+                if not self._access_token:
+                    raise ValueError(
+                        "access_token is required for subscription auth mode"
+                    )
+                self._client = AsyncOpenAI(
+                    api_key=self._access_token,
+                    base_url=oauth.CHATGPT_CODEX_BASE_URL,
+                    default_headers={"ChatGPT-Account-Id": self._account_id or ""},
+                    max_retries=0,
+                )
+            else:
+                if self._api_key is None:
+                    raise ValueError("api_key or client must be provided for API calls")
+                self._client = AsyncOpenAI(
+                    api_key=self._api_key, base_url=self.base_url, max_retries=0
+                )
         return self._client
 
     @staticmethod
