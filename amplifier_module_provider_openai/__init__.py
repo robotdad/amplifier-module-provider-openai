@@ -358,10 +358,14 @@ class OpenAIProvider:
         """
         List available OpenAI models.
 
-        Queries the OpenAI API for available models and filters to GPT-5+ series
-        and deep research models.
+        In subscription mode, returns a hardcoded list of subscription-gated models.
+        In API key mode, queries the OpenAI API for available models and filters to
+        GPT-5+ series and deep research models.
         Raises exception if API query fails (no fallback - caller handles empty lists).
         """
+        if self._auth_mode == "subscription":
+            return self._list_subscription_models()
+
         # Query OpenAI models API - let exceptions propagate
         models_response = await self.client.models.list()
         models = []
@@ -422,6 +426,52 @@ class OpenAIProvider:
             )
 
         # Sort alphabetically by display name
+        return sorted(models, key=lambda m: m.display_name.lower())
+
+    def _list_subscription_models(self) -> list[ModelInfo]:
+        """Return hardcoded ModelInfo list for subscription mode.
+
+        Iterates over oauth.SUBSCRIPTION_MODELS and builds a ModelInfo for each,
+        then appends a 'custom' entry. Returns sorted by display_name.lower().
+        """
+        models: list[ModelInfo] = []
+
+        for model_id in oauth.SUBSCRIPTION_MODELS:
+            display_name = self._model_id_to_display_name(model_id)
+            caps = get_capabilities(model_id)
+
+            if self.enable_long_context and caps.long_context_pricing_threshold:
+                context_window = caps.context_window
+            else:
+                context_window = (
+                    caps.long_context_pricing_threshold or caps.context_window
+                )
+
+            capabilities = list(caps.capability_tags)
+
+            models.append(
+                ModelInfo(
+                    id=model_id,
+                    display_name=display_name,
+                    context_window=context_window,
+                    max_output_tokens=caps.max_output_tokens,
+                    capabilities=capabilities,
+                    defaults={"max_tokens": 16384, "reasoning_effort": "none"},
+                )
+            )
+
+        # Append the custom model option
+        models.append(
+            ModelInfo(
+                id="custom",
+                display_name="Custom Model",
+                context_window=200000,
+                max_output_tokens=128000,
+                capabilities=["tools", "streaming"],
+                defaults={"max_tokens": 16384},
+            )
+        )
+
         return sorted(models, key=lambda m: m.display_name.lower())
 
     def _model_id_to_display_name(self, model_id: str) -> str:

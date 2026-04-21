@@ -301,3 +301,95 @@ class TestClientConstruction:
 
         with _pytest.raises(ValueError):
             _ = provider.client
+
+
+# ---------------------------------------------------------------------------
+# TestListModelsSubscription — task-13
+# ---------------------------------------------------------------------------
+
+
+class TestListModelsSubscription:
+    """list_models() in subscription mode returns hardcoded model list."""
+
+    def _make_subscription_provider(self) -> OpenAIProvider:
+        """Return a provider configured for subscription auth mode."""
+        provider = OpenAIProvider(
+            config={"auth_mode": "subscription", "max_retries": 0}
+        )
+        provider._access_token = "test-access-token"
+        provider._account_id = "user-123"
+        return provider
+
+    @pytest.mark.asyncio
+    async def test_returns_all_subscription_model_ids(self):
+        """list_models() in subscription mode must include all SUBSCRIPTION_MODELS ids."""
+        from amplifier_module_provider_openai import oauth
+
+        provider = self._make_subscription_provider()
+        models = await provider.list_models()
+        model_ids = {m.id for m in models}
+
+        for model_id in oauth.SUBSCRIPTION_MODELS:
+            assert model_id in model_ids, (
+                f"Expected {model_id!r} in returned models, got {sorted(model_ids)}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_includes_custom_option(self):
+        """list_models() in subscription mode must include a 'custom' model."""
+        provider = self._make_subscription_provider()
+        models = await provider.list_models()
+        model_ids = [m.id for m in models]
+
+        assert "custom" in model_ids, (
+            f"Expected 'custom' in returned model IDs, got {model_ids}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_total_count_is_six(self):
+        """list_models() in subscription mode must return exactly 6 models (5 + custom)."""
+        provider = self._make_subscription_provider()
+        models = await provider.list_models()
+
+        assert len(models) == 6, (
+            f"Expected 6 models (5 subscription + custom), got {len(models)}: "
+            f"{[m.id for m in models]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_models_have_correct_modelinfo_structure(self):
+        """Each model must have id, display_name, context_window > 0, max_output_tokens > 0."""
+        provider = self._make_subscription_provider()
+        models = await provider.list_models()
+
+        for model in models:
+            assert model.id, f"Model missing id: {model!r}"
+            assert model.display_name, f"Model missing display_name: {model!r}"
+            assert model.context_window > 0, (
+                f"Model {model.id!r} has context_window={model.context_window}"
+            )
+            assert model.max_output_tokens > 0, (
+                f"Model {model.id!r} has max_output_tokens={model.max_output_tokens}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_subscription_mode_does_not_call_client_models_list(self):
+        """Subscription mode list_models() must NOT call client.models.list()."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        provider = self._make_subscription_provider()
+
+        mock_client = MagicMock()
+        mock_client.models.list = AsyncMock(
+            side_effect=AssertionError(
+                "client.models.list() must NOT be called in subscription mode"
+            )
+        )
+
+        with patch(
+            "amplifier_module_provider_openai.AsyncOpenAI", return_value=mock_client
+        ):
+            # Should not raise — subscription mode short-circuits before calling the API
+            await provider.list_models()
+
+        mock_client.models.list.assert_not_called()
