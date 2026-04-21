@@ -556,3 +556,114 @@ class TestSubscription401Handler:
                     await provider.complete(_simple_request())
 
         mock_load_tokens.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestSubscriptionEndToEnd — task-15
+# ---------------------------------------------------------------------------
+
+
+class TestSubscriptionEndToEnd:
+    """End-to-end integration tests for subscription and api_key auth modes."""
+
+    def _make_subscription_provider(self) -> OpenAIProvider:
+        """Return a provider configured for subscription auth mode."""
+        provider = OpenAIProvider(
+            config={
+                "auth_mode": "subscription",
+                "max_retries": 0,
+                "use_streaming": False,
+            }
+        )
+        provider._access_token = "test-access-token"
+        provider._account_id = "user-123"
+        return provider
+
+    @pytest.mark.asyncio
+    async def test_subscription_provider_can_complete_chat_request(self):
+        """Subscription provider must be able to complete a chat request end-to-end.
+
+        Creates a provider with subscription config, sets _access_token and
+        _account_id, mocks client.responses.create with DummyResponse, and
+        verifies that complete() returns a result.
+        """
+        from amplifier_core.message_models import ChatRequest, Message
+
+        provider = self._make_subscription_provider()
+
+        mock_client = MagicMock()
+        mock_client.responses.create = AsyncMock(return_value=DummyResponse())
+
+        with patch(
+            "amplifier_module_provider_openai.AsyncOpenAI", return_value=mock_client
+        ):
+            result = await provider.complete(
+                ChatRequest(messages=[Message(role="user", content="Hello")])
+            )
+
+        assert result is not None, "complete() must return a non-None result"
+
+    def test_subscription_and_api_key_use_different_base_urls(self):
+        """Subscription and api_key providers must use different base URLs.
+
+        Subscription uses chatgpt.com; api_key uses api.openai.com.
+        """
+        from amplifier_module_provider_openai import oauth
+
+        sub_provider = self._make_subscription_provider()
+        api_key_provider = OpenAIProvider(api_key="sk-test", config={"max_retries": 0})
+
+        sub_base_url = None
+        api_base_url = sentinel = object()  # distinct sentinel
+
+        mock_sub_client = MagicMock()
+        with patch(
+            "amplifier_module_provider_openai.AsyncOpenAI", return_value=mock_sub_client
+        ) as mock_cls:
+            _ = sub_provider.client
+            sub_base_url = mock_cls.call_args.kwargs.get("base_url")
+
+        mock_api_client = MagicMock()
+        with patch(
+            "amplifier_module_provider_openai.AsyncOpenAI", return_value=mock_api_client
+        ) as mock_cls:
+            _ = api_key_provider.client
+            api_base_url = mock_cls.call_args.kwargs.get("base_url")
+
+        # Subscription must target chatgpt.com
+        assert sub_base_url == oauth.CHATGPT_CODEX_BASE_URL, (
+            f"Expected subscription base_url={oauth.CHATGPT_CODEX_BASE_URL!r}, "
+            f"got {sub_base_url!r}"
+        )
+
+        # api_key must target api.openai.com (None = SDK default = api.openai.com)
+        assert sub_base_url != api_base_url, (
+            "Subscription and api_key providers must use different base_urls; "
+            f"both resolved to {sub_base_url!r}"
+        )
+        assert "chatgpt.com" not in (api_base_url or ""), (
+            f"api_key provider must NOT use chatgpt.com base_url, got {api_base_url!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_existing_api_key_test_pattern_still_works(self):
+        """Existing api_key test pattern must continue to work unchanged.
+
+        Uses the standard OpenAIProvider(api_key='test-key', ...) pattern with
+        a mocked client.responses.create, and verifies complete() succeeds.
+        """
+        from amplifier_core.message_models import ChatRequest, Message
+
+        provider = OpenAIProvider(api_key="test-key", config={"use_streaming": False})
+
+        mock_client = MagicMock()
+        mock_client.responses.create = AsyncMock(return_value=DummyResponse())
+
+        with patch(
+            "amplifier_module_provider_openai.AsyncOpenAI", return_value=mock_client
+        ):
+            result = await provider.complete(
+                ChatRequest(messages=[Message(role="user", content="Hello")])
+            )
+
+        assert result is not None, "complete() must return a non-None result"
