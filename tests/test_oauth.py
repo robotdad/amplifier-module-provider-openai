@@ -1,10 +1,13 @@
 """Tests for OAuth constants and PKCE helper functions."""
 
+import asyncio
 import base64
 import hashlib
 import json
 import stat
 from datetime import datetime, timezone, timedelta
+from io import BytesIO
+from unittest.mock import MagicMock, patch
 
 from amplifier_module_provider_openai.oauth import (
     CHATGPT_CODEX_BASE_URL,
@@ -24,6 +27,7 @@ from amplifier_module_provider_openai.oauth import (
     generate_pkce_pair,
     is_token_valid,
     load_tokens,
+    refresh_tokens,
     save_tokens,
 )
 
@@ -234,3 +238,132 @@ class TestIsTokenValid:
             "expires_at": "not-a-valid-datetime",
         }
         assert is_token_valid(tokens) is False
+
+
+# ---------------------------------------------------------------------------
+# Helpers shared by TestRefreshTokens
+# ---------------------------------------------------------------------------
+
+
+def _mock_urlopen_response(data: dict) -> MagicMock:
+    """Create a mock urllib response that returns JSON-encoded *data*.
+
+    The mock supports the context-manager protocol so it can be used with::
+
+        with urlopen(req) as response:
+            body = response.read()
+    """
+    encoded = json.dumps(data).encode("utf-8")
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = encoded
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+    return mock_resp
+
+
+class TestRefreshTokens:
+    """Verify refresh_tokens() exchanges a refresh token for new credentials."""
+
+    def test_successful_refresh_returns_new_tokens(self, tmp_path):
+        """Successful refresh returns a dict with all required fields."""
+        path = str(tmp_path / "tokens.json")
+        # Seed an existing token file so account_id can be preserved.
+        save_tokens({"account_id": "acct_123"}, path)
+
+        mock_resp = _mock_urlopen_response(
+            {
+                "access_token": "new_access",
+                "refresh_token": "new_refresh",
+                "id_token": "new_id",
+                "expires_in": 3600,
+            }
+        )
+        with patch(
+            "amplifier_module_provider_openai.oauth.urlopen", return_value=mock_resp
+        ):
+            result = asyncio.run(refresh_tokens("old_refresh", path=path))
+
+        assert result is not None
+        assert result["auth_mode"] == "oauth"
+        assert result["access_token"] == "new_access"
+        assert result["refresh_token"] == "new_refresh"
+        assert result["id_token"] == "new_id"
+        assert result["account_id"] == "acct_123"
+        assert "expires_at" in result
+
+    def test_refresh_saves_to_disk(self, tmp_path):
+        """Successful refresh persists the new token dict to disk."""
+        path = str(tmp_path / "tokens.json")
+
+        mock_resp = _mock_urlopen_response(
+            {
+                "access_token": "saved_access",
+                "refresh_token": "saved_refresh",
+                "id_token": "saved_id",
+                "expires_in": 3600,
+            }
+        )
+        with patch(
+            "amplifier_module_provider_openai.oauth.urlopen", return_value=mock_resp
+        ):
+            asyncio.run(refresh_tokens("old_refresh", path=path))
+
+        assert (tmp_path / "tokens.json").exists()
+        with open(path) as f:
+            saved = json.load(f)
+        assert saved["access_token"] == "saved_access"
+        assert saved["auth_mode"] == "oauth"
+
+    def test_refresh_sends_correct_request_params(self, tmp_path):
+        """POST body contains grant_type, refresh_token, and client_id."""
+        from urllib.parse import parse_qs
+
+        path = str(tmp_path / "tokens.json")
+        captured: list = []
+
+        mock_resp = _mock_urlopen_response(
+            {
+                "access_token": "tok",
+                "refresh_token": "ref",
+                "id_token": "idtok",
+                "expires_in": 3600,
+            }
+        )
+
+        def capturing_urlopen(req):
+            captured.append(req)
+            return mock_resp
+
+        with patch(
+            "amplifier_module_provider_openai.oauth.urlopen",
+            side_effect=capturing_urlopen,
+        ):
+            asyncio.run(refresh_tokens("my_refresh_token", path=path))
+
+        assert len(captured) == 1
+        req = captured[0]
+        params = parse_qs(req.data.decode("utf-8"))
+        assert params["grant_type"] == ["refresh_token"]
+        assert params["refresh_token"] == ["my_refresh_token"]
+        assert params["client_id"] == [OAUTH_CLIENT_ID]
+
+    def test_refresh_failure_returns_none(self, tmp_path):
+        """HTTP failure during refresh logs a warning and returns None."""
+        from urllib.error import HTTPError
+
+        path = str(tmp_path / "tokens.json")
+
+        http_error = HTTPError(
+            url=OAUTH_TOKEN_URL,
+            code=401,
+            msg="Unauthorized",
+            hdrs={},  # type: ignore[arg-type]
+            fp=BytesIO(b'{"error": "invalid_grant"}'),
+        )
+
+        with patch(
+            "amplifier_module_provider_openai.oauth.urlopen", side_effect=http_error
+        ):
+            result = asyncio.run(refresh_tokens("bad_refresh", path=path))
+
+        assert result is None

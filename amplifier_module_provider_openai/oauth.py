@@ -10,7 +10,9 @@ import json
 import logging
 import os
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +166,65 @@ def is_token_valid(tokens: dict | None) -> bool:
         expiry = expiry.replace(tzinfo=timezone.utc)
 
     return expiry > datetime.now(tz=timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Token refresh
+# ---------------------------------------------------------------------------
+
+
+async def refresh_tokens(refresh_token: str, path: str | None = None) -> dict | None:
+    """Exchange a refresh token for new credentials.
+
+    POSTs to OAUTH_TOKEN_URL with the grant_type=refresh_token flow.
+    On success, persists the new token dict to disk and returns it.
+    On failure, logs a warning and returns None.
+
+    Args:
+        refresh_token: The refresh token to exchange.
+        path: Destination file path for token storage. Defaults to TOKEN_FILE_PATH.
+
+    Returns:
+        Token dict on success, None on failure.
+    """
+    data = urlencode(
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": OAUTH_CLIENT_ID,
+        }
+    ).encode("utf-8")
+
+    req = Request(OAUTH_TOKEN_URL, data=data, method="POST")
+
+    try:
+        with urlopen(req) as response:
+            token_data = json.loads(response.read())
+    except Exception as exc:
+        logger.warning("Failed to refresh tokens: %s", exc)
+        return None
+
+    # Compute expires_at from the expires_in field in the response.
+    expires_in = token_data.get("expires_in", 3600)
+    expires_at = (
+        datetime.now(tz=timezone.utc) + timedelta(seconds=expires_in)
+    ).isoformat()
+
+    # Preserve account_id from any existing tokens stored on disk.
+    existing = load_tokens(path)
+    account_id = existing.get("account_id") if existing else None
+
+    result = {
+        "auth_mode": "oauth",
+        "access_token": token_data["access_token"],
+        "refresh_token": token_data.get("refresh_token", refresh_token),
+        "id_token": token_data.get("id_token"),
+        "account_id": account_id,
+        "expires_at": expires_at,
+    }
+
+    save_tokens(result, path)
+    return result
 
 
 # ---------------------------------------------------------------------------
