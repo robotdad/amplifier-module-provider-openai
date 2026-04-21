@@ -52,6 +52,7 @@ from ._constants import NATIVE_TOOL_TYPES
 from ._response_handling import convert_response_with_accumulated_output
 from ._response_handling import extract_reasoning_text
 from ._capabilities import get_capabilities
+from . import oauth
 
 logger = logging.getLogger(__name__)
 
@@ -67,25 +68,67 @@ class OpenAIChatResponse(ChatResponse):
 
 
 async def mount(coordinator: ModuleCoordinator, config: dict[str, Any] | None = None):
-    """Mount the OpenAI provider."""
+    """Mount the OpenAI provider.
+
+    Supports two auth modes via config['auth_mode']:
+    - 'api_key' (default): uses an API key from config or OPENAI_API_KEY env var.
+    - 'subscription': uses OAuth tokens from disk; refreshes or re-authenticates
+      as needed.
+    """
     config = config or {}
+    auth_mode = config.get("auth_mode", "api_key")
 
-    # Get API key from config or environment
-    api_key = config.get("api_key") or os.environ.get("OPENAI_API_KEY")
+    if auth_mode == "subscription":
+        # Load cached tokens from disk.
+        tokens = oauth.load_tokens()
 
-    if not api_key:
-        logger.warning("No API key found for OpenAI provider")
-        return None
+        if oauth.is_token_valid(tokens):
+            # Cached tokens are fresh — use them directly.
+            pass
+        elif tokens is not None:
+            # Tokens exist but are expired — attempt a silent refresh.
+            refresh_token = tokens.get("refresh_token")
+            if refresh_token:
+                tokens = await oauth.refresh_tokens(refresh_token)
 
-    provider = OpenAIProvider(api_key=api_key, config=config, coordinator=coordinator)
-    await coordinator.mount("providers", provider, name="openai")
-    logger.info("Mounted OpenAIProvider (Responses API)")
+        if not oauth.is_token_valid(tokens):
+            # No valid tokens on disk and refresh failed (or no refresh token) —
+            # trigger an interactive login flow.
+            tokens = await oauth.login()
 
-    # Return cleanup function
-    async def cleanup():
-        await provider.close()
+        # At this point tokens is always a valid dict: oauth.login() raises
+        # RuntimeError on all failure paths and never returns None.
+        assert tokens is not None
 
-    return cleanup
+        provider = OpenAIProvider(config=config, coordinator=coordinator)
+        provider._access_token = tokens["access_token"]
+        provider._account_id = tokens.get("account_id")
+        await coordinator.mount("providers", provider, name="openai")
+        logger.info("Mounted OpenAIProvider (subscription mode)")
+
+        async def cleanup():
+            await provider.close()
+
+        return cleanup
+
+    else:
+        # api_key mode: existing behaviour, completely untouched.
+        api_key = config.get("api_key") or os.environ.get("OPENAI_API_KEY")
+
+        if not api_key:
+            logger.warning("No API key found for OpenAI provider")
+            return None
+
+        provider = OpenAIProvider(
+            api_key=api_key, config=config, coordinator=coordinator
+        )
+        await coordinator.mount("providers", provider, name="openai")
+        logger.info("Mounted OpenAIProvider (Responses API)")
+
+        async def cleanup():
+            await provider.close()
+
+        return cleanup
 
 
 class OpenAIProvider:
@@ -111,6 +154,11 @@ class OpenAIProvider:
         self._client: AsyncOpenAI | None = client  # Lazy init if None
         self.config = config or {}
         self.coordinator = coordinator
+
+        # Subscription / OAuth auth attributes
+        self._auth_mode: str = self.config.get("auth_mode", "api_key")
+        self._access_token: str | None = None
+        self._account_id: str | None = None
 
         # Configuration with sensible defaults (from _constants.py - single source of truth)
         self.base_url = self.config.get(

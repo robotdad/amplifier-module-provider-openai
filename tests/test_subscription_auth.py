@@ -1,13 +1,18 @@
-"""Tests for subscription authentication support (task-10).
+"""Tests for subscription authentication support (task-10 and task-11).
 
-Tests for the auth_mode ConfigField added to get_info().
+Tests for the auth_mode ConfigField added to get_info(), and for the
+subscription mount path added to mount().
 Note: ConfigField uses field_type='choice' and choices=[...], which is the
 amplifier-core equivalent of the spec's conceptual 'select' + 'options'.
 """
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from amplifier_module_provider_openai import OpenAIProvider
+import pytest
+
+from amplifier_module_provider_openai import OpenAIProvider, mount
 
 
 class DummyResponse:
@@ -83,4 +88,85 @@ class TestAuthModeConfigField:
         info = provider.get_info()
         assert info.config_fields[0].id == "auth_mode", (
             f"Expected auth_mode to be first, got '{info.config_fields[0].id}'"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Helpers for mount() tests
+# ---------------------------------------------------------------------------
+
+
+class FakeMountCoordinator:
+    """Coordinator stub that captures mount() calls for testing."""
+
+    def __init__(self):
+        self.hooks = FakeHooks()
+        self.mounted: dict = {}
+
+    async def mount(self, namespace: str, provider, *, name: str) -> None:
+        self.mounted[name] = provider
+
+
+def _make_valid_tokens() -> dict:
+    """Return a token dict with a valid (future) expiry."""
+    expires_at = (datetime.now(tz=timezone.utc) + timedelta(hours=1)).isoformat()
+    return {
+        "auth_mode": "oauth",
+        "access_token": "test-access-token",
+        "refresh_token": "test-refresh-token",
+        "account_id": "user-123",
+        "expires_at": expires_at,
+    }
+
+
+# ---------------------------------------------------------------------------
+# TestMountSubscription — task-11
+# ---------------------------------------------------------------------------
+
+
+class TestMountSubscription:
+    """Tests for the subscription auth_mode path in mount()."""
+
+    @pytest.mark.asyncio
+    async def test_subscription_mount_calls_load_tokens(self):
+        """Subscription mount must call oauth.load_tokens to retrieve cached tokens."""
+        coordinator = FakeMountCoordinator()
+        tokens = _make_valid_tokens()
+
+        with patch(
+            "amplifier_module_provider_openai.oauth.load_tokens",
+            return_value=tokens,
+        ) as mock_load:
+            await mount(coordinator, config={"auth_mode": "subscription"})
+
+        mock_load.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_api_key_mount_unchanged(self):
+        """api_key mount path must still work when api_key is in config."""
+        coordinator = FakeMountCoordinator()
+
+        cleanup = await mount(
+            coordinator, config={"api_key": "test-key", "max_retries": 0}
+        )
+
+        assert "openai" in coordinator.mounted, "Provider was not mounted"
+        assert isinstance(coordinator.mounted["openai"], OpenAIProvider)
+        assert callable(cleanup)
+
+    @pytest.mark.asyncio
+    async def test_subscription_mount_sets_auth_mode_on_provider(self):
+        """Subscription mount must set _auth_mode='subscription' on the created provider."""
+        coordinator = FakeMountCoordinator()
+        tokens = _make_valid_tokens()
+
+        with patch(
+            "amplifier_module_provider_openai.oauth.load_tokens",
+            return_value=tokens,
+        ):
+            await mount(coordinator, config={"auth_mode": "subscription"})
+
+        provider = coordinator.mounted["openai"]
+        assert provider._auth_mode == "subscription", (
+            f"Expected _auth_mode='subscription', got '{provider._auth_mode}'"
         )
