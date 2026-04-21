@@ -24,6 +24,7 @@ from amplifier_module_provider_openai.oauth import (
     OAUTH_TOKEN_URL,
     SUBSCRIPTION_MODELS,
     TOKEN_FILE_PATH,
+    exchange_code_for_tokens,
     extract_account_id,
     generate_pkce_pair,
     is_token_valid,
@@ -412,3 +413,146 @@ class TestExtractAccountId:
     def test_returns_empty_string_for_empty_string_input(self):
         """Returns empty string for an empty input string."""
         assert extract_account_id("") == ""
+
+
+class TestExchangeCodeForTokens:
+    """Verify exchange_code_for_tokens() exchanges an authorization code for credentials."""
+
+    def test_successful_exchange_returns_tokens_with_correct_fields(self, tmp_path):
+        """Successful exchange returns a dict with all required fields."""
+        path = str(tmp_path / "tokens.json")
+        account_id = "acct_exchange_123"
+        id_token = _make_jwt(
+            {
+                "sub": account_id,
+                "https://api.openai.com/profile": {"account_id": account_id},
+            }
+        )
+        mock_resp = _mock_urlopen_response(
+            {
+                "access_token": "new_access",
+                "refresh_token": "new_refresh",
+                "id_token": id_token,
+                "expires_in": 3600,
+            }
+        )
+        with patch(
+            "amplifier_module_provider_openai.oauth.urlopen", return_value=mock_resp
+        ):
+            result = asyncio.run(
+                exchange_code_for_tokens(
+                    code="auth_code_abc",
+                    code_verifier="verifier_xyz",
+                    redirect_uri="http://localhost:1455/auth/callback",
+                    token_file_path=path,
+                )
+            )
+
+        assert result is not None
+        assert result["auth_mode"] == "oauth"
+        assert result["access_token"] == "new_access"
+        assert result["refresh_token"] == "new_refresh"
+        assert result["id_token"] == id_token
+        assert result["account_id"] == account_id
+        assert "expires_at" in result
+
+    def test_exchange_saves_to_disk(self, tmp_path):
+        """Successful exchange persists the new token dict to disk."""
+        path = str(tmp_path / "tokens.json")
+        id_token = _make_jwt({"sub": "acct_save_test"})
+        mock_resp = _mock_urlopen_response(
+            {
+                "access_token": "saved_access",
+                "refresh_token": "saved_refresh",
+                "id_token": id_token,
+                "expires_in": 3600,
+            }
+        )
+        with patch(
+            "amplifier_module_provider_openai.oauth.urlopen", return_value=mock_resp
+        ):
+            asyncio.run(
+                exchange_code_for_tokens(
+                    code="auth_code",
+                    code_verifier="verifier",
+                    redirect_uri="http://localhost:1455/auth/callback",
+                    token_file_path=path,
+                )
+            )
+
+        assert (tmp_path / "tokens.json").exists()
+        with open(path) as f:
+            saved = json.load(f)
+        assert saved["access_token"] == "saved_access"
+        assert saved["auth_mode"] == "oauth"
+
+    def test_exchange_sends_correct_params(self, tmp_path):
+        """POST body contains grant_type, code, code_verifier, client_id, redirect_uri."""
+        from urllib.parse import parse_qs
+
+        path = str(tmp_path / "tokens.json")
+        captured: list = []
+        id_token = _make_jwt({"sub": "acct_params_test"})
+        mock_resp = _mock_urlopen_response(
+            {
+                "access_token": "tok",
+                "refresh_token": "ref",
+                "id_token": id_token,
+                "expires_in": 3600,
+            }
+        )
+
+        def capturing_urlopen(req):
+            captured.append(req)
+            return mock_resp
+
+        with patch(
+            "amplifier_module_provider_openai.oauth.urlopen",
+            side_effect=capturing_urlopen,
+        ):
+            asyncio.run(
+                exchange_code_for_tokens(
+                    code="my_auth_code",
+                    code_verifier="my_code_verifier",
+                    redirect_uri="http://localhost:1455/auth/callback",
+                    token_file_path=path,
+                )
+            )
+
+        assert len(captured) == 1
+        req = captured[0]
+        params = parse_qs(req.data.decode("utf-8"))
+        assert params["grant_type"] == ["authorization_code"]
+        assert params["code"] == ["my_auth_code"]
+        assert params["code_verifier"] == ["my_code_verifier"]
+        assert params["client_id"] == [OAUTH_CLIENT_ID]
+        assert params["redirect_uri"] == ["http://localhost:1455/auth/callback"]
+
+    def test_exchange_failure_raises_exception(self, tmp_path):
+        """HTTP failure during exchange raises an exception (does not swallow it)."""
+        from urllib.error import HTTPError
+
+        path = str(tmp_path / "tokens.json")
+
+        http_error = HTTPError(
+            url=OAUTH_TOKEN_URL,
+            code=400,
+            msg="Bad Request",
+            hdrs={},  # type: ignore[arg-type]
+            fp=BytesIO(b'{"error": "invalid_grant"}'),
+        )
+
+        with patch(
+            "amplifier_module_provider_openai.oauth.urlopen", side_effect=http_error
+        ):
+            import pytest
+
+            with pytest.raises(Exception):
+                asyncio.run(
+                    exchange_code_for_tokens(
+                        code="bad_code",
+                        code_verifier="bad_verifier",
+                        redirect_uri="http://localhost:1455/auth/callback",
+                        token_file_path=path,
+                    )
+                )

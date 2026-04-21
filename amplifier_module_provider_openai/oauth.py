@@ -228,6 +228,73 @@ async def refresh_tokens(refresh_token: str, path: str | None = None) -> dict | 
 
 
 # ---------------------------------------------------------------------------
+# Authorization code exchange
+# ---------------------------------------------------------------------------
+
+
+async def exchange_code_for_tokens(
+    *,
+    code: str,
+    code_verifier: str,
+    redirect_uri: str,
+    token_file_path: str | None = None,
+) -> dict:
+    """Exchange an authorization code for OAuth tokens.
+
+    POSTs to OAUTH_TOKEN_URL with the grant_type=authorization_code flow.
+    On success, persists the token dict to disk and returns it.
+    Raises on failure (does not catch exceptions).
+
+    Args:
+        code: The authorization code received from the OAuth redirect.
+        code_verifier: The PKCE code verifier that matches the original challenge.
+        redirect_uri: The redirect URI used in the original authorization request.
+        token_file_path: Destination file path for token storage. Defaults to TOKEN_FILE_PATH.
+
+    Returns:
+        Token dict with auth_mode, access_token, refresh_token, id_token, account_id,
+        and expires_at.
+
+    Raises:
+        Exception: Any error from the HTTP request or response parsing propagates up.
+    """
+    data = urlencode(
+        {
+            "grant_type": "authorization_code",
+            "code": code,
+            "code_verifier": code_verifier,
+            "client_id": OAUTH_CLIENT_ID,
+            "redirect_uri": redirect_uri,
+        }
+    ).encode("utf-8")
+
+    req = Request(OAUTH_TOKEN_URL, data=data, method="POST")
+
+    with urlopen(req) as response:
+        token_data = json.loads(response.read())
+
+    id_token = token_data.get("id_token", "")
+    account_id = extract_account_id(id_token)
+
+    expires_in = token_data.get("expires_in", 3600)
+    expires_at = (
+        datetime.now(tz=timezone.utc) + timedelta(seconds=expires_in)
+    ).isoformat()
+
+    result = {
+        "auth_mode": "oauth",
+        "access_token": token_data["access_token"],
+        "refresh_token": token_data.get("refresh_token"),
+        "id_token": id_token,
+        "account_id": account_id,
+        "expires_at": expires_at,
+    }
+
+    save_tokens(result, token_file_path)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # JWT helpers
 # ---------------------------------------------------------------------------
 
