@@ -31,6 +31,7 @@ from amplifier_module_provider_openai.oauth import (
     load_tokens,
     refresh_tokens,
     save_tokens,
+    start_browser_flow,
     start_device_code_flow,
 )
 
@@ -638,3 +639,57 @@ class TestDeviceCodeFlow:
             with patch("asyncio.sleep", new_callable=AsyncMock):
                 with pytest.raises(RuntimeError, match="Device code expired"):
                     asyncio.run(start_device_code_flow())
+
+
+class TestBrowserFlow:
+    """Verify start_browser_flow() performs browser-based PKCE authorization."""
+
+    def test_successful_callback_returns_code_and_verifier(self):
+        """Successful browser callback returns authorization_code and code_verifier."""
+        import io
+        import pytest
+
+        captured_handler = {}
+        mock_server = MagicMock()
+
+        def capture_server(addr, handler_cls):
+            captured_handler["cls"] = handler_cls
+            return mock_server
+
+        def simulate_callback():
+            """Simulate an HTTP GET callback with ?code=test_auth_code."""
+            handler_cls = captured_handler["cls"]
+            handler = object.__new__(handler_cls)
+            handler.path = "/auth/callback?code=test_auth_code"
+            handler.wfile = io.BytesIO()
+            handler.send_response = MagicMock()
+            handler.send_header = MagicMock()
+            handler.end_headers = MagicMock()
+            handler.do_GET()
+
+        mock_server.handle_request.side_effect = simulate_callback
+
+        with patch(
+            "amplifier_module_provider_openai.oauth.HTTPServer",
+            side_effect=capture_server,
+        ):
+            with patch("webbrowser.open"):
+                result = asyncio.run(start_browser_flow())
+
+        assert result["authorization_code"] == "test_auth_code"
+        assert "code_verifier" in result
+        assert isinstance(result["code_verifier"], str)
+
+    def test_port_unavailable_raises_oserror(self):
+        """OSError is raised when the callback port is already in use."""
+        import pytest
+
+        def raise_oserror(addr, handler_cls):
+            raise OSError("[Errno 98] Address already in use")
+
+        with patch(
+            "amplifier_module_provider_openai.oauth.HTTPServer",
+            side_effect=raise_oserror,
+        ):
+            with pytest.raises(OSError):
+                asyncio.run(start_browser_flow())

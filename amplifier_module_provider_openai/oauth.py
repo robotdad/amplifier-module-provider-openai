@@ -11,8 +11,11 @@ import json
 import logging
 import os
 import secrets
+import threading  # noqa: F401 — required by spec; run_in_executor uses threads internally
+import webbrowser
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlencode
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
@@ -458,3 +461,112 @@ async def start_device_code_flow() -> dict:
             raise RuntimeError(f"Device code flow error: {error}")
 
         await asyncio.sleep(interval)
+
+
+# ---------------------------------------------------------------------------
+# Browser-based PKCE flow
+# ---------------------------------------------------------------------------
+
+
+async def start_browser_flow() -> dict:
+    """Perform browser-based PKCE authorization and return authorization credentials.
+
+    Step 1: Generates a PKCE (code_verifier, code_challenge) pair.
+
+    Step 2: Starts a local HTTP server on localhost:OAUTH_CALLBACK_PORT with a
+    CallbackHandler that captures the 'code' query parameter from the OAuth
+    redirect.
+
+    Step 3: Builds the authorization URL with client_id, redirect_uri,
+    response_type=code, scope, code_challenge, and code_challenge_method=S256,
+    then opens it in the user's browser via webbrowser.open().
+
+    Step 4: Waits up to 300 seconds for the browser callback via
+    loop.run_in_executor(), then returns the captured code.
+
+    Returns:
+        A dict with keys:
+
+        - ``authorization_code``: the authorization code returned by the server.
+        - ``code_verifier``: the PKCE code verifier string for use when
+          exchanging the authorization code for tokens.
+
+    Raises:
+        OSError: If the callback port is already in use.
+        RuntimeError: If the authorization server returns an error callback or
+            the 300-second wait times out.
+    """
+    code_verifier, code_challenge = generate_pkce_pair()
+
+    result: dict = {}
+
+    class CallbackHandler(BaseHTTPRequestHandler):
+        """Handles a single OAuth callback GET request."""
+
+        def do_GET(self) -> None:
+            """Parse the callback URL and capture the authorization code."""
+            parsed = urlparse(self.path)
+            params = parse_qs(parsed.query)
+            if "code" in params:
+                result["code"] = params["code"][0]
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(
+                    b"<html><body>"
+                    b"<h1>Authorization successful!</h1>"
+                    b"<p>You may close this window.</p>"
+                    b"</body></html>"
+                )
+            elif "error" in params:
+                result["error"] = params["error"][0]
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(
+                    b"<html><body>"
+                    b"<h1>Authorization error.</h1>"
+                    b"<p>Please try again.</p>"
+                    b"</body></html>"
+                )
+            else:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(
+                    b"<html><body><h1>Invalid callback.</h1></body></html>"
+                )
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            """Suppress all server request log output."""
+
+    server = HTTPServer(("localhost", OAUTH_CALLBACK_PORT), CallbackHandler)
+
+    auth_params = urlencode(
+        {
+            "client_id": OAUTH_CLIENT_ID,
+            "redirect_uri": OAUTH_CALLBACK_URL,
+            "response_type": "code",
+            "scope": OAUTH_SCOPES,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+        }
+    )
+    auth_url = f"{OAUTH_AUTHORIZE_URL}?{auth_params}"
+    webbrowser.open(auth_url)
+
+    loop = asyncio.get_event_loop()
+    try:
+        await asyncio.wait_for(
+            loop.run_in_executor(None, server.handle_request),
+            timeout=300,
+        )
+    except asyncio.TimeoutError:
+        raise RuntimeError("Browser authorization timed out after 300 seconds.")
+    finally:
+        server.server_close()
+
+    if "error" in result:
+        raise RuntimeError(f"Authorization error: {result['error']}")
+
+    return {
+        "authorization_code": result["code"],
+        "code_verifier": code_verifier,
+    }
