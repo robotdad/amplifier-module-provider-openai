@@ -8,9 +8,13 @@ amplifier-core equivalent of the spec's conceptual 'select' + 'options'.
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+import openai
 import pytest
+from amplifier_core import llm_errors as kernel_errors
+from amplifier_core.message_models import ChatRequest, Message
 
 from amplifier_module_provider_openai import OpenAIProvider, mount
 
@@ -393,3 +397,162 @@ class TestListModelsSubscription:
             await provider.list_models()
 
         mock_client.models.list.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestSubscription401Handler — task-14
+# ---------------------------------------------------------------------------
+
+
+def _mock_httpx_response(status_code: int = 401) -> httpx.Response:
+    """Build a minimal httpx.Response for OpenAI SDK error constructors."""
+    return httpx.Response(
+        status_code=status_code,
+        request=httpx.Request("POST", "https://chatgpt.com/backend-api/codex"),
+    )
+
+
+def _simple_request() -> ChatRequest:
+    return ChatRequest(messages=[Message(role="user", content="Hello")])
+
+
+def _make_mock_api_response():
+    """Return a minimal mock response object that OpenAIProvider can process."""
+    return SimpleNamespace(
+        output=[],
+        usage=None,
+        output_text=None,
+        status="completed",
+        finish_reason=None,
+        id="resp-test-123",
+        incomplete_details=None,
+    )
+
+
+class TestSubscription401Handler:
+    """Tests for 401 handler with token refresh and retry in subscription mode."""
+
+    def _make_subscription_provider(self) -> OpenAIProvider:
+        """Return a provider configured for subscription auth mode."""
+        provider = OpenAIProvider(
+            config={
+                "auth_mode": "subscription",
+                "max_retries": 0,
+                "use_streaming": False,
+            }
+        )
+        provider._access_token = "test-access-token"
+        provider._account_id = "user-123"
+        return provider
+
+    def _make_auth_error(self) -> openai.AuthenticationError:
+        """Build a minimal openai.AuthenticationError for testing."""
+        return openai.AuthenticationError(
+            "Unauthorized",
+            response=_mock_httpx_response(401),
+            body=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_401_triggers_refresh_and_retry(self):
+        """401 in subscription mode triggers token refresh and retries the API call.
+
+        mock create fails first with AuthenticationError, succeeds second time;
+        verify create called twice.
+        """
+        provider = self._make_subscription_provider()
+
+        auth_error = self._make_auth_error()
+        mock_response = _make_mock_api_response()
+
+        tokens_with_refresh = {
+            "access_token": "old-token",
+            "refresh_token": "my-refresh-token",
+        }
+        new_tokens = {
+            "access_token": "new-access-token",
+            "refresh_token": "new-refresh-token",
+        }
+
+        mock_client = MagicMock()
+        mock_create = AsyncMock(side_effect=[auth_error, mock_response])
+        mock_client.responses.create = mock_create
+
+        with patch(
+            "amplifier_module_provider_openai.AsyncOpenAI", return_value=mock_client
+        ):
+            with patch(
+                "amplifier_module_provider_openai.oauth.load_tokens",
+                return_value=tokens_with_refresh,
+            ):
+                with patch(
+                    "amplifier_module_provider_openai.oauth.refresh_tokens",
+                    AsyncMock(return_value=new_tokens),
+                ):
+                    await provider.complete(_simple_request())
+
+        assert mock_create.call_count == 2, (
+            f"Expected create to be called twice (failed then retried successfully), "
+            f"got {mock_create.call_count}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_401_refresh_failure_raises_kernel_auth_error(self):
+        """401 in subscription mode raises kernel AuthenticationError when refresh fails."""
+        provider = self._make_subscription_provider()
+        auth_error = self._make_auth_error()
+
+        tokens_with_refresh = {
+            "access_token": "old-token",
+            "refresh_token": "my-refresh-token",
+        }
+
+        mock_client = MagicMock()
+        mock_client.responses.create = AsyncMock(side_effect=auth_error)
+
+        with patch(
+            "amplifier_module_provider_openai.AsyncOpenAI", return_value=mock_client
+        ):
+            with patch(
+                "amplifier_module_provider_openai.oauth.load_tokens",
+                return_value=tokens_with_refresh,
+            ):
+                with patch(
+                    "amplifier_module_provider_openai.oauth.refresh_tokens",
+                    AsyncMock(return_value=None),
+                ):
+                    with pytest.raises(kernel_errors.AuthenticationError):
+                        await provider.complete(_simple_request())
+
+    @pytest.mark.asyncio
+    async def test_401_in_api_key_mode_raises_immediately_without_refresh(self):
+        """401 in api_key mode raises kernel AuthenticationError immediately.
+
+        oauth.load_tokens must NOT be called in api_key mode.
+        """
+        provider = OpenAIProvider(
+            api_key="sk-test-key",
+            config={"max_retries": 0, "use_streaming": False},
+        )
+
+        auth_error = openai.AuthenticationError(
+            "Invalid API key",
+            response=_mock_httpx_response(401),
+            body=None,
+        )
+
+        mock_client = MagicMock()
+        mock_client.responses.create = AsyncMock(side_effect=auth_error)
+        mock_load_tokens = MagicMock()
+
+        with patch(
+            "amplifier_module_provider_openai.AsyncOpenAI", return_value=mock_client
+        ):
+            with patch(
+                "amplifier_module_provider_openai.oauth.load_tokens",
+                mock_load_tokens,
+            ):
+                with pytest.raises(kernel_errors.AuthenticationError):
+                    await provider.complete(_simple_request())
+
+        mock_load_tokens.assert_not_called()

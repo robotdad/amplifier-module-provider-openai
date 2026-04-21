@@ -1122,6 +1122,20 @@ class OpenAIProvider:
                     retry_after=retry_after,
                 ) from e
             except openai.AuthenticationError as e:
+                # Subscription mode: attempt a token refresh and retry once.
+                # Guard with _401_retry_attempted to prevent infinite recursion.
+                if self._auth_mode == "subscription" and not getattr(
+                    self, "_401_retry_attempted", False
+                ):
+                    self._401_retry_attempted = True
+                    tokens = oauth.load_tokens()
+                    if tokens and tokens.get("refresh_token"):
+                        new_tokens = await oauth.refresh_tokens(tokens["refresh_token"])
+                        if new_tokens:
+                            self._access_token = new_tokens["access_token"]
+                            self._client = None  # force lazy re-init with new token
+                            return await _do_complete()  # recursive retry
+                # Fall through: non-subscription, no refresh_token, or refresh failed.
                 body = getattr(e, "body", None)
                 error_msg = json.dumps(body) if body is not None else str(e)
                 raise kernel_errors.AuthenticationError(
@@ -1219,6 +1233,10 @@ class OpenAIProvider:
                     provider=self.name,
                     retryable=True,
                 ) from e
+            finally:
+                # Always reset the 401-retry guard so subsequent calls are not
+                # permanently blocked if the provider instance is reused.
+                self._401_retry_attempted = False
 
         async def _on_retry(attempt: int, delay: float, error: kernel_errors.LLMError):
             """Callback invoked before each retry sleep."""
