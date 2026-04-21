@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import stat
+from datetime import datetime, timezone, timedelta
 
 from amplifier_module_provider_openai.oauth import (
     CHATGPT_CODEX_BASE_URL,
@@ -21,6 +22,7 @@ from amplifier_module_provider_openai.oauth import (
     SUBSCRIPTION_MODELS,
     TOKEN_FILE_PATH,
     generate_pkce_pair,
+    is_token_valid,
     load_tokens,
     save_tokens,
 )
@@ -186,3 +188,49 @@ class TestLoadTokens:
         (tmp_path / "tokens.json").touch()
         result = load_tokens(path)
         assert result is None
+
+
+class TestIsTokenValid:
+    """Verify is_token_valid checks token existence and expiry."""
+
+    def _future_expires_at(self) -> str:
+        """Return an ISO 8601 timestamp one hour in the future (UTC)."""
+        future = datetime.now(tz=timezone.utc) + timedelta(hours=1)
+        return future.isoformat()
+
+    def _past_expires_at(self) -> str:
+        """Return an ISO 8601 timestamp one hour in the past (UTC)."""
+        past = datetime.now(tz=timezone.utc) - timedelta(hours=1)
+        return past.isoformat()
+
+    def test_valid_token_not_expired_returns_true(self):
+        tokens = {
+            "access_token": "tok_abc",
+            "expires_at": self._future_expires_at(),
+        }
+        assert is_token_valid(tokens) is True
+
+    def test_expired_token_returns_false(self):
+        tokens = {
+            "access_token": "tok_abc",
+            "expires_at": self._past_expires_at(),
+        }
+        assert is_token_valid(tokens) is False
+
+    def test_none_tokens_returns_false(self):
+        assert is_token_valid(None) is False
+
+    def test_missing_access_token_returns_false(self):
+        tokens = {"expires_at": self._future_expires_at()}
+        assert is_token_valid(tokens) is False
+
+    def test_missing_expires_at_returns_false(self):
+        tokens = {"access_token": "tok_abc"}
+        assert is_token_valid(tokens) is False
+
+    def test_malformed_expires_at_returns_false(self):
+        tokens = {
+            "access_token": "tok_abc",
+            "expires_at": "not-a-valid-datetime",
+        }
+        assert is_token_valid(tokens) is False

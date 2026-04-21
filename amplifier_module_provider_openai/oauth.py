@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import secrets
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,45 @@ def load_tokens(path: str | None = None) -> dict | None:
     except json.JSONDecodeError:
         logger.warning("Malformed JSON in token file: %s", path)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Token validation
+# ---------------------------------------------------------------------------
+
+
+def is_token_valid(tokens: dict | None) -> bool:
+    """Check whether a token dict contains a valid, unexpired access token.
+
+    Returns True only if ``tokens`` contains a non-empty ``access_token`` and
+    an ``expires_at`` timestamp that is strictly in the future.
+
+    Args:
+        tokens: Token dict (typically loaded via :func:`load_tokens`) or None.
+
+    Returns:
+        True if the token exists and has not expired, False otherwise.
+    """
+    if tokens is None:
+        return False
+
+    if not tokens.get("access_token"):
+        return False
+
+    expires_at = tokens.get("expires_at")
+    if not expires_at:
+        return False
+
+    try:
+        expiry = datetime.fromisoformat(expires_at)
+    except (ValueError, TypeError):
+        return False
+
+    # Treat timezone-naive datetimes as UTC.
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+
+    return expiry > datetime.now(tz=timezone.utc)
 
 
 # ---------------------------------------------------------------------------
