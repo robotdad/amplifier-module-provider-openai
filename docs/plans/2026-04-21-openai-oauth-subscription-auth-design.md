@@ -10,39 +10,50 @@ Currently the OpenAI provider requires a platform API key for authentication. Us
 
 ## Approach
 
-**Auth strategy module pattern.** A new `oauth.py` file encapsulates all OAuth concerns and exposes a clean interface to the provider. The existing `__init__.py` gets a thin conditional at mount and client construction points. No separate provider subclass, no forked request logic.
+**Auth strategy module pattern.** A new `oauth.py` file encapsulates all OAuth concerns and exposes a clean interface to the provider. The existing `__init__.py` gets a thin conditional at four touch points: `get_info()`, `mount()`, the `client` property, and `complete()` 401 handling. No separate provider subclass, no forked request logic.
 
 This was chosen over a separate provider subclass (the pattern Letta uses) because maintaining two provider classes leads to divergence over time and doubles the surface area for bugs. The strategy module pattern keeps one provider with a clean internal seam — roughly 10-15 lines of conditional logic in the existing code, with all OAuth complexity isolated in its own file.
 
 **Constraint:** The current API key path must keep working untouched. All changes are additive.
 
+### SDK Compatibility
+
+The existing Amplifier OpenAI provider already uses exclusively the Responses API (`client.responses.stream()` and `client.responses.create()`). When `base_url` is set to `https://chatgpt.com/backend-api/codex`, the OpenAI Python SDK constructs `https://chatgpt.com/backend-api/codex/responses` — which is exactly what the ChatGPT backend expects. OpenClaw confirms this works in production with the Node.js OpenAI SDK using the same pattern.
+
+This means **no raw httpx, no separate HTTP client class, and no forked request path**. The same SDK calls work for both auth modes — only the client construction differs:
+
+| Auth Mode | `base_url` | SDK constructs |
+|-----------|-----------|----------------|
+| API key | `https://api.openai.com/v1` (default) | `https://api.openai.com/v1/responses` |
+| Subscription | `https://chatgpt.com/backend-api/codex` | `https://chatgpt.com/backend-api/codex/responses` |
+
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                  __init__.py                         │
-│                                                      │
-│  get_info()  ── new ConfigField: auth_mode           │
-│                                                      │
-│  mount()     ── if subscription → oauth.load/login   │
-│              ── if api_key      → existing path      │
-│                                                      │
-│  client      ── if subscription → OAuth client       │
-│              ── if api_key      → existing client     │
-│                                                      │
-│  complete()  ── on 401 + subscription → refresh+retry│
-└──────────────────────┬──────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                  __init__.py                             │
+│                                                         │
+│  get_info()  ── new ConfigField: auth_mode              │
+│                                                         │
+│  mount()     ── if subscription → oauth.load/login      │
+│              ── if api_key      → existing path         │
+│                                                         │
+│  client      ── if subscription → OAuth client          │
+│              ── if api_key      → existing client        │
+│                                                         │
+│  complete()  ── on 401 + subscription → refresh+retry   │
+└──────────────────────┬──────────────────────────────────┘
                        │ imports
                        ▼
-┌─────────────────────────────────────────────────────┐
-│                   oauth.py                           │
-│                                                      │
-│  login()          — PKCE flow + browser + callback   │
-│  load_tokens()    — read ~/.amplifier/openai-oauth   │
-│  refresh_tokens() — POST refresh_token to /token     │
-│  is_token_valid() — expiry check for init gate       │
-│  CONSTANTS        — endpoints, client ID, scopes     │
-└──────────────────────┬──────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                   oauth.py                              │
+│                                                         │
+│  login()          — PKCE flow + browser + callback      │
+│  load_tokens()    — read ~/.amplifier/openai-oauth.json │
+│  refresh_tokens() — POST refresh_token to /token        │
+│  is_token_valid() — expiry check for init gate          │
+│  CONSTANTS        — endpoints, client ID, scopes        │
+└──────────────────────┬──────────────────────────────────┘
                        │ reads/writes
                        ▼
             ~/.amplifier/openai-oauth.json
@@ -86,8 +97,10 @@ All OAuth-related constants in one place:
 | Client ID | `app_EMoamEEZ73f0CkXaXp7hrann` |
 | Scopes | `openid profile email offline_access` |
 | Callback URL | `http://localhost:1455/auth/callback` |
-| ChatGPT backend base URL | `https://chatgpt.com/backend-api/codex/responses` |
+| ChatGPT backend base URL | `https://chatgpt.com/backend-api/codex` |
 | Token file path | `~/.amplifier/openai-oauth.json` |
+
+**Resolved: RFC 8693 secondary token exchange.** The RFC 8693 secondary token exchange (`id_token` → API-key-style token) performed by the Codex CLI is not needed. The OAuth `access_token` is used directly as a Bearer token against the ChatGPT backend endpoint. All three reference implementations (Codex CLI, Letta, OpenClaw) confirm the `access_token` is passed as the Bearer token for inference requests.
 
 ### Token Storage
 
@@ -99,7 +112,7 @@ Simple JSON file at `~/.amplifier/openai-oauth.json` with `0600` permissions:
   "access_token": "<jwt>",
   "refresh_token": "<opaque>",
   "id_token": "<jwt>",
-  "account_id": "<workspace-id>",
+  "account_id": "<openai-account-id>",
   "expires_at": "<iso-timestamp>"
 }
 ```
@@ -126,9 +139,9 @@ When the user picks `"subscription"`, the provider manage UI skips the API key p
 
 #### `mount()` Changes
 
-A conditional at the top of mount:
+A conditional at the top of mount. Note: `mount()` handles credential loading and validation only — client construction is deferred to the lazy `client` property.
 
-- If `auth_mode == "subscription"`: call into `oauth.py` to load stored tokens, check validity (one-time init check), initiate login flow if no tokens exist. Build the provider with the OAuth credentials.
+- If `auth_mode == "subscription"`: call into `oauth.py` to load stored tokens, check validity (one-time init check), attempt refresh if expired, initiate login flow if no tokens exist or refresh fails. Store the OAuth credentials (access token, account ID) on the provider instance.
 - If `auth_mode == "api_key"` (or unset): existing behavior, completely untouched.
 
 #### Client Construction Changes
@@ -136,21 +149,24 @@ A conditional at the top of mount:
 The `client` property gets a conditional for OAuth mode:
 
 ```python
+# Subscription mode
 AsyncOpenAI(
-    api_key=self._access_token,       # Bearer token
-    base_url=CHATGPT_CODEX_BASE_URL,
-    default_headers={"ChatGPT-Account-ID": self._account_id},
+    api_key=self._access_token,
+    base_url="https://chatgpt.com/backend-api/codex",
+    default_headers={"ChatGPT-Account-Id": self._account_id},
     max_retries=0,
 )
 ```
 
-The OpenAI SDK's `api_key` param is used as the Bearer token — this is what Codex CLI does after the RFC 8693 exchange. The `default_headers` kwarg injects the account ID header on every request. No custom HTTP client needed.
+The OpenAI SDK's `api_key` param is used as the Bearer token — the SDK sets `Authorization: Bearer {api_key}` on every request. The `default_headers` kwarg injects the `ChatGPT-Account-Id` header on every request. This header is **required** for subscription auth — all three reference implementations (Codex CLI, Letta, OpenClaw) send it. No custom HTTP client needed.
 
 For API key mode, client construction is identical to today.
 
 #### 401 Handling
 
 A small addition to error handling in `complete()`: if the response is a 401 and we're in OAuth mode, call `oauth.refresh_tokens()`, rebuild the client with the new access token, and retry the request once. If refresh fails, surface the error cleanly as an `AuthenticationError` directing the user to re-authenticate.
+
+**Streaming 401 handling:** If a 401 occurs mid-stream, the stream is aborted, tokens are refreshed, and the full request is retried from the beginning (not resumed from mid-stream). Partial streamed output from the failed attempt is discarded.
 
 ## Data Flow
 
@@ -169,8 +185,7 @@ User selects "subscription" in provider manage
     → Code exchanged at /oauth/token
     → Tokens + account_id saved to ~/.amplifier/openai-oauth.json (0600)
   → Provider stores access_token and account_id in memory
-  → Client constructed with OAuth credentials
-  → Provider mounted successfully
+  → Provider mounted successfully (client constructed lazily on first use)
 ```
 
 ### Normal Session (Tokens Valid)
@@ -180,8 +195,24 @@ mount() detects auth_mode == "subscription"
   → oauth.load_tokens() → tokens loaded
   → oauth.is_token_valid() → true
   → Provider stores access_token and account_id in memory
-  → Client constructed with OAuth credentials
+  → Provider mounted successfully (client constructed lazily on first use)
   → API calls proceed normally
+```
+
+### Expired Tokens at Mount
+
+```
+mount() detects auth_mode == "subscription"
+  → oauth.load_tokens() → tokens loaded
+  → oauth.is_token_valid() → false (expired)
+  → oauth.refresh_tokens() attempted
+    → If refresh succeeds:
+      → New tokens saved to ~/.amplifier/openai-oauth.json
+      → Provider stores refreshed access_token and account_id in memory
+      → Provider mounted successfully
+    → If refresh fails (refresh token also expired/revoked):
+      → oauth.login() starts (full browser-based PKCE flow)
+      → Same flow as First-Time Setup from here
 ```
 
 ### Token Refresh (401 During Session)
@@ -213,7 +244,11 @@ If `~/.amplifier/openai-oauth.json` is missing, malformed, or has invalid data, 
 
 ### Port Conflict
 
-The local callback server on `localhost:1455` might conflict with something else (or with a running Codex CLI). If the port is unavailable, the provider should try a small range of fallback ports and update the redirect URI accordingly, or fail with a clear message about the port conflict.
+The local callback server binds `localhost:1455`. The OAuth client registration (`app_EMoamEEZ73f0CkXaXp7hrann`) has a fixed redirect URI (`http://localhost:1455/auth/callback`). Dynamic port fallback is **not possible** — using a different port would cause an OAuth redirect-URI mismatch error from the authorization server. If port 1455 is unavailable, the provider fails with a clear error message explaining the port conflict and suggesting the user free the port (e.g., close the Codex CLI if it's running on that port).
+
+## Model Listing in Subscription Mode
+
+In subscription mode, the ChatGPT backend does not expose a `/models` endpoint for dynamic model discovery. The initial implementation uses a hardcoded list of known subscription-available models (e.g., `gpt-5.4`, `gpt-5.3`, `gpt-5.2`, `o3`, `o4-mini`, etc.), similar to how Letta handles subscription model listing. This list is maintained as a constant in `oauth.py` and can be refined as the ChatGPT backend API matures. In API key mode, existing dynamic model listing behavior is unchanged.
 
 ## Testing Strategy
 
@@ -221,28 +256,25 @@ The local callback server on `localhost:1455` might conflict with something else
 - **Unit tests for `oauth.py`:** Test token serialization/deserialization, expiry checking, PKCE challenge generation, and token file permission enforcement. Mock the HTTP exchanges for login and refresh flows.
 - **Integration test for auth mode switching:** Verify that the provider correctly selects the OAuth or API key path based on `auth_mode` config, and that the two modes are mutually exclusive.
 - **401 retry test:** Mock a 401 response followed by a successful refresh, verify the request is retried exactly once. Mock a 401 with a failed refresh, verify `AuthenticationError` is raised.
-- **Edge case tests:** Missing token file triggers login. Malformed token file triggers login. Port conflict produces a clear error.
+- **Streaming 401 test:** Mock a 401 mid-stream, verify the stream is aborted, tokens refreshed, and the full request retried from the beginning.
+- **Edge case tests:** Missing token file triggers login. Malformed token file triggers login. Port conflict produces a clear error. Expired tokens at mount trigger refresh then fallback to login.
 
 ## Scope of Changes
 
 | Type | Path | Description |
 |---|---|---|
-| New file | `oauth.py` | Login flow, token storage, refresh, constants |
+| New file | `oauth.py` | Login flow, token storage, refresh, constants, hardcoded model list |
 | Modified file | `__init__.py` | Conditional in `mount()`, conditional in `client` property, 401 retry wrapper, new config field in `get_info()` |
 | Runtime artifact | `~/.amplifier/openai-oauth.json` | Created on first login (0600 permissions) |
-| Unchanged | Everything else | Streaming, tool handling, model listing, existing tests |
+| Unchanged | Everything else | Streaming, tool handling, existing tests |
 
 ## Reference Implementations Studied
 
 - **OpenAI Codex CLI** (Rust) — Full PKCE + device code flow, RFC 8693 token exchange, `~/.codex/auth.json` storage
-- **OpenClaw** (TypeScript) — Multi-provider OAuth with per-agent token sink, file-locked refresh, adapter pattern
-- **Letta** (Python) — Dual-auth with separate provider type, OAuth credentials stored as JSON in encrypted DB column, separate httpx client for ChatGPT backend
+- **OpenClaw** (TypeScript) — Multi-provider OAuth with per-agent token sink, file-locked refresh, adapter pattern. Confirms `AsyncOpenAI(base_url="https://chatgpt.com/backend-api/codex")` works with the standard SDK.
+- **Letta** (Python) — Dual-auth with separate provider type, OAuth credentials stored as JSON in encrypted DB column, separate httpx client for ChatGPT backend (we avoid this approach by reusing the SDK)
 - **Amplifier GitHub Copilot provider** — Env var token resolution, lazy client init, fail-closed security pattern
 
 ## Open Questions
 
-1. **Device code flow for headless environments.** Should we support the device code flow (for headless/remote environments) in addition to the browser-based PKCE flow, or is browser-only sufficient for an initial implementation?
-
-2. **RFC 8693 secondary token exchange.** Should we perform the RFC 8693 secondary token exchange (`id_token` → API-key-style token) that Codex CLI does, or is using the `access_token` directly as a Bearer token sufficient?
-
-3. **Model listing in subscription mode.** Should model listing behave differently in subscription mode? The ChatGPT backend may not have a `/models` endpoint, which could mean using a hardcoded model list (as Letta does) rather than dynamic discovery.
+1. **Device code flow for headless environments.** Should we support the device code flow (for headless/remote environments) in addition to the browser-based PKCE flow? **Disposition:** Out of scope for initial implementation. Browser-based PKCE is sufficient for the first version. Device code flow can be added as a follow-on for headless/remote environments.
