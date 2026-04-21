@@ -4,6 +4,7 @@ Implements RFC 7636 PKCE (Proof Key for Code Exchange) and defines all
 OAuth/device flow endpoints for OpenAI authentication.
 """
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -366,3 +367,94 @@ def generate_pkce_pair() -> tuple[str, str]:
     code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
     return code_verifier, code_challenge
+
+
+# ---------------------------------------------------------------------------
+# Device code flow
+# ---------------------------------------------------------------------------
+
+
+async def start_device_code_flow() -> dict:
+    """Perform device code authorization flow and return authorization credentials.
+
+    Step 1: POSTs to DEVICE_CODE_USERCODE_URL with client_id and scope to
+    obtain a user_code, device_code, and polling interval.
+
+    Step 2: Prints the verification URL and user code to the terminal so the
+    user can authorize the device in a browser.
+
+    Step 3: Polls DEVICE_CODE_TOKEN_URL until the user authorizes or an error
+    occurs.  Handles these poll responses:
+
+    - ``authorization_pending``: continue polling after sleeping *interval* seconds.
+    - ``slow_down``: increase *interval* by 5 and continue polling.
+    - ``expired_token``: raise :exc:`RuntimeError`.
+    - any other error: raise :exc:`RuntimeError`.
+    - success (no ``error`` key): return immediately.
+
+    Returns:
+        A dict with keys:
+
+        - ``authorization_code``: the code returned by the authorization server.
+        - ``code_verifier``: a freshly generated PKCE code verifier string for
+          use when exchanging the authorization code for tokens.
+
+    Raises:
+        RuntimeError: If the device code expires or the server returns an
+            unhandled error.
+    """
+    # Generate a PKCE pair; code_verifier is returned to the caller for later
+    # token exchange via exchange_code_for_tokens().
+    code_verifier, _ = generate_pkce_pair()
+
+    # Step 1: Request a device code and user code from the authorization server.
+    data = urlencode(
+        {
+            "client_id": OAUTH_CLIENT_ID,
+            "scope": OAUTH_SCOPES,
+        }
+    ).encode("utf-8")
+
+    req = Request(DEVICE_CODE_USERCODE_URL, data=data, method="POST")
+    with urlopen(req) as response:
+        device_data = json.loads(response.read())
+
+    user_code: str = device_data["user_code"]
+    device_code: str = device_data["device_code"]
+    interval: int = device_data.get("interval", DEVICE_CODE_POLL_INTERVAL)
+
+    # Step 2: Prompt the user to authorize via their browser.
+    print(f"Visit {DEVICE_CODE_VERIFICATION_URL} and enter code: {user_code}")
+
+    # Step 3: Poll until authorized or an error occurs.
+    while True:
+        poll_data = urlencode(
+            {
+                "client_id": OAUTH_CLIENT_ID,
+                "device_code": device_code,
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            }
+        ).encode("utf-8")
+
+        poll_req = Request(DEVICE_CODE_TOKEN_URL, data=poll_data, method="POST")
+        with urlopen(poll_req) as response:
+            result = json.loads(response.read())
+
+        error = result.get("error")
+
+        if error is None:
+            # Success — return the authorization code and PKCE verifier.
+            return {
+                "authorization_code": result["authorization_code"],
+                "code_verifier": code_verifier,
+            }
+        elif error == "authorization_pending":
+            pass  # User hasn't authorized yet; sleep then retry.
+        elif error == "slow_down":
+            interval += 5
+        elif error == "expired_token":
+            raise RuntimeError("Device code expired. Please try again.")
+        else:
+            raise RuntimeError(f"Device code flow error: {error}")
+
+        await asyncio.sleep(interval)

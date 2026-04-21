@@ -7,7 +7,7 @@ import json
 import stat
 from datetime import datetime, timezone, timedelta
 from io import BytesIO
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from amplifier_module_provider_openai.oauth import (
     CHATGPT_CODEX_BASE_URL,
@@ -31,6 +31,7 @@ from amplifier_module_provider_openai.oauth import (
     load_tokens,
     refresh_tokens,
     save_tokens,
+    start_device_code_flow,
 )
 
 
@@ -556,3 +557,84 @@ class TestExchangeCodeForTokens:
                         token_file_path=path,
                     )
                 )
+
+
+class TestDeviceCodeFlow:
+    """Verify start_device_code_flow() performs device code authorization."""
+
+    def test_requests_device_code_and_returns_auth_code_after_polling(self):
+        """Happy path: requests device code, polls once, returns authorization_code and code_verifier."""
+        usercode_response = _mock_urlopen_response(
+            {
+                "user_code": "ABCD-EFGH",
+                "device_code": "dev_code_xyz",
+                "interval": 5,
+            }
+        )
+        token_response = _mock_urlopen_response(
+            {
+                "authorization_code": "auth_code_123",
+            }
+        )
+
+        with patch(
+            "amplifier_module_provider_openai.oauth.urlopen",
+            side_effect=[usercode_response, token_response],
+        ):
+            with patch("asyncio.sleep", new_callable=AsyncMock):
+                result = asyncio.run(start_device_code_flow())
+
+        assert "authorization_code" in result
+        assert result["authorization_code"] == "auth_code_123"
+        assert "code_verifier" in result
+        assert isinstance(result["code_verifier"], str)
+
+    def test_polls_through_multiple_authorization_pending_responses(self):
+        """Verifies sleep is called once per authorization_pending response."""
+        usercode_response = _mock_urlopen_response(
+            {
+                "user_code": "WXYZ-1234",
+                "device_code": "dev_code_abc",
+                "interval": 5,
+            }
+        )
+        pending_response_1 = _mock_urlopen_response({"error": "authorization_pending"})
+        pending_response_2 = _mock_urlopen_response({"error": "authorization_pending"})
+        token_response = _mock_urlopen_response({"authorization_code": "auth_code_456"})
+
+        with patch(
+            "amplifier_module_provider_openai.oauth.urlopen",
+            side_effect=[
+                usercode_response,
+                pending_response_1,
+                pending_response_2,
+                token_response,
+            ],
+        ):
+            with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+                result = asyncio.run(start_device_code_flow())
+
+        assert mock_sleep.call_count == 2
+        assert "authorization_code" in result
+        assert result["authorization_code"] == "auth_code_456"
+
+    def test_expired_device_code_raises_runtime_error(self):
+        """expired_token error raises RuntimeError with appropriate message."""
+        import pytest
+
+        usercode_response = _mock_urlopen_response(
+            {
+                "user_code": "ABCD-EFGH",
+                "device_code": "dev_code_xyz",
+                "interval": 5,
+            }
+        )
+        expired_response = _mock_urlopen_response({"error": "expired_token"})
+
+        with patch(
+            "amplifier_module_provider_openai.oauth.urlopen",
+            side_effect=[usercode_response, expired_response],
+        ):
+            with patch("asyncio.sleep", new_callable=AsyncMock):
+                with pytest.raises(RuntimeError, match="Device code expired"):
+                    asyncio.run(start_device_code_flow())
