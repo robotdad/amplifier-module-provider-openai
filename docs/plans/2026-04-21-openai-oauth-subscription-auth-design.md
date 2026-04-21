@@ -48,7 +48,7 @@ This means **no raw httpx, no separate HTTP client class, and no forked request 
 ┌─────────────────────────────────────────────────────────┐
 │                   oauth.py                              │
 │                                                         │
-│  login()          — PKCE flow + browser + callback      │
+│  login()          — dual-path: browser PKCE + device code│
 │  load_tokens()    — read ~/.amplifier/openai-oauth.json │
 │  refresh_tokens() — POST refresh_token to /token        │
 │  is_token_valid() — expiry check for init gate          │
@@ -68,16 +68,32 @@ Encapsulates all OAuth concerns. The rest of the provider imports from this modu
 
 #### Login Flow
 
-A `login()` function that runs the full PKCE authorization code flow:
+The `login()` function runs both a browser-based PKCE flow and a device code flow in parallel — whichever the user completes first wins:
 
-1. Generate a PKCE code verifier + SHA256 challenge
-2. Start a temporary local HTTP server on `localhost:1455` (matching the Codex CLI callback port)
-3. Open the user's browser to `auth.openai.com/oauth/authorize` with standard scopes
-4. Receive the authorization code on the callback
-5. Exchange it for `id_token`, `access_token`, and `refresh_token` at `/oauth/token`
-6. Extract the `account_id` from the `id_token` claims
-7. Save everything to `~/.amplifier/openai-oauth.json`
-8. Return the credentials
+**Device code path (always shown):**
+
+1. Posts to `auth.openai.com/api/accounts/deviceauth/usercode` to get a one-time device code
+2. Displays the verification URL (`auth.openai.com/codex/device`) and the code to the terminal
+3. Polls `auth.openai.com/api/accounts/deviceauth/token` every 5 seconds until authorized or the code expires (server-controlled expiry, typically 15-30 minutes)
+4. On success, receives an authorization code + PKCE pair for token exchange
+
+**Browser path (attempted simultaneously):**
+
+1. Generates PKCE code verifier + SHA256 challenge
+2. Starts a temporary local HTTP server on `localhost:1455` (matching the Codex CLI callback port)
+3. Attempts to open the user's browser to `auth.openai.com/oauth/authorize` with standard scopes
+4. If browser opens and user completes auth, receives the authorization code on the callback
+
+**Completion:**
+
+- Whichever path delivers an authorization code first is used
+- The other path is cancelled (device code polling stops, or local server shuts down)
+- The authorization code is exchanged for `id_token`, `access_token`, and `refresh_token` at `/oauth/token` (same exchange for both paths)
+- The `account_id` is extracted from the `id_token` claims
+- Everything is saved to `~/.amplifier/openai-oauth.json`
+- Credentials are returned
+
+**Why both:** On desktop machines, the browser opens and the user doesn't even notice the device code in the terminal. On headless/remote/SSH environments (e.g., SSH into a Raspberry Pi with a desktop environment), the browser attempt silently fails (or opens on a monitor nobody is looking at), and the user grabs the device code URL on their phone or laptop. No configuration needed — it just works in both scenarios.
 
 #### Token Management
 
@@ -99,6 +115,11 @@ All OAuth-related constants in one place:
 | Callback URL | `http://localhost:1455/auth/callback` |
 | ChatGPT backend base URL | `https://chatgpt.com/backend-api/codex` |
 | Token file path | `~/.amplifier/openai-oauth.json` |
+| Device code user code endpoint | `{issuer}/api/accounts/deviceauth/usercode` |
+| Device code token polling endpoint | `{issuer}/api/accounts/deviceauth/token` |
+| Device code verification URL (shown to user) | `{issuer}/codex/device` |
+| Device code polling interval | 5 seconds |
+| Device code expiry | Server-controlled (typically 15-30 minutes) |
 
 **Resolved: RFC 8693 secondary token exchange.** The RFC 8693 secondary token exchange (`id_token` → API-key-style token) performed by the Codex CLI is not needed. The OAuth `access_token` is used directly as a Bearer token against the ChatGPT backend endpoint. All three reference implementations (Codex CLI, Letta, OpenClaw) confirm the `access_token` is passed as the Bearer token for inference requests.
 
@@ -176,12 +197,16 @@ A small addition to error handling in `complete()`: if the response is a 401 and
 User selects "subscription" in provider manage
   → mount() detects auth_mode == "subscription"
   → oauth.load_tokens() → no file found
-  → oauth.login() starts
-    → PKCE verifier/challenge generated
-    → Local server binds localhost:1455
-    → Browser opens auth.openai.com/oauth/authorize
-    → User authenticates with OpenAI
-    → Callback received with authorization code
+  → oauth.login() starts both flows simultaneously
+    → Device code path: POST to /api/accounts/deviceauth/usercode
+    → Terminal displays:
+        "Open this URL on any device: https://auth.openai.com/codex/device"
+        "Enter code: ABCD-1234"
+        "(Also attempting to open browser locally...)"
+    → Browser path: PKCE verifier/challenge generated, local server binds
+      localhost:1455, browser open attempted
+    → User completes auth via whichever path works for their environment
+    → First successful path provides the authorization code
     → Code exchanged at /oauth/token
     → Tokens + account_id saved to ~/.amplifier/openai-oauth.json (0600)
   → Provider stores access_token and account_id in memory
@@ -211,7 +236,7 @@ mount() detects auth_mode == "subscription"
       → Provider stores refreshed access_token and account_id in memory
       → Provider mounted successfully
     → If refresh fails (refresh token also expired/revoked):
-      → oauth.login() starts (full browser-based PKCE flow)
+      → oauth.login() starts (dual-path: browser PKCE + device code)
       → Same flow as First-Time Setup from here
 ```
 
@@ -242,9 +267,13 @@ On a 401, the provider attempts one refresh. If the refresh itself fails (refres
 
 If `~/.amplifier/openai-oauth.json` is missing, malformed, or has invalid data, the provider treats it the same as "no tokens stored" and initiates the login flow (since the user already chose subscription mode).
 
+### Device Code Expiry
+
+If the user doesn't complete authorization within the server's expiry window, the device code polling receives an `expired_token` response. The provider displays a clear "Authorization code expired, please try again" message and offers to restart the login flow.
+
 ### Port Conflict
 
-The local callback server binds `localhost:1455`. The OAuth client registration (`app_EMoamEEZ73f0CkXaXp7hrann`) has a fixed redirect URI (`http://localhost:1455/auth/callback`). Dynamic port fallback is **not possible** — using a different port would cause an OAuth redirect-URI mismatch error from the authorization server. If port 1455 is unavailable, the provider fails with a clear error message explaining the port conflict and suggesting the user free the port (e.g., close the Codex CLI if it's running on that port).
+The local callback server binds `localhost:1455`. The OAuth client registration (`app_EMoamEEZ73f0CkXaXp7hrann`) has a fixed redirect URI (`http://localhost:1455/auth/callback`). Dynamic port fallback is **not possible** — using a different port would cause an OAuth redirect-URI mismatch error from the authorization server. If port 1455 is unavailable, the browser path is skipped but the device code path still works — the login flow degrades gracefully to device-code-only when the local server can't start.
 
 ## Model Listing in Subscription Mode
 
@@ -263,7 +292,7 @@ In subscription mode, the ChatGPT backend does not expose a `/models` endpoint f
 
 | Type | Path | Description |
 |---|---|---|
-| New file | `oauth.py` | Login flow, token storage, refresh, constants, hardcoded model list |
+| New file | `oauth.py` | Dual-path login flow (browser PKCE + device code), token storage, refresh, constants, hardcoded model list. Device code flow adds a polling loop but token exchange, storage, and refresh logic is shared between both paths. |
 | Modified file | `__init__.py` | Conditional in `mount()`, conditional in `client` property, 401 retry wrapper, new config field in `get_info()` |
 | Runtime artifact | `~/.amplifier/openai-oauth.json` | Created on first login (0600 permissions) |
 | Unchanged | Everything else | Streaming, tool handling, existing tests |
@@ -277,4 +306,4 @@ In subscription mode, the ChatGPT backend does not expose a `/models` endpoint f
 
 ## Open Questions
 
-1. **Device code flow for headless environments.** Should we support the device code flow (for headless/remote environments) in addition to the browser-based PKCE flow? **Disposition:** Out of scope for initial implementation. Browser-based PKCE is sufficient for the first version. Device code flow can be added as a follow-on for headless/remote environments.
+None at this time. Device code flow for headless environments was initially deferred but is now included in the design as the dual-path login approach (see Login Flow section above).
