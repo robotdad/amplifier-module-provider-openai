@@ -614,7 +614,7 @@ class TestSubscriptionEndToEnd:
         api_key_provider = OpenAIProvider(api_key="sk-test", config={"max_retries": 0})
 
         sub_base_url = None
-        api_base_url = sentinel = object()  # distinct sentinel
+        api_base_url = None
 
         mock_sub_client = MagicMock()
         with patch(
