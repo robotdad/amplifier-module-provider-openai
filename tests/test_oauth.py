@@ -24,6 +24,7 @@ from amplifier_module_provider_openai.oauth import (
     OAUTH_TOKEN_URL,
     SUBSCRIPTION_MODELS,
     TOKEN_FILE_PATH,
+    extract_account_id,
     generate_pkce_pair,
     is_token_valid,
     load_tokens,
@@ -367,3 +368,47 @@ class TestRefreshTokens:
             result = asyncio.run(refresh_tokens("bad_refresh", path=path))
 
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Helper for TestExtractAccountId
+# ---------------------------------------------------------------------------
+
+
+def _make_jwt(payload: dict) -> str:
+    """Create a minimal fake JWT with the given payload (unsigned)."""
+    header_b64 = (
+        base64.urlsafe_b64encode(b'{"alg":"RS256","typ":"JWT"}')
+        .rstrip(b"=")
+        .decode("ascii")
+    )
+    payload_bytes = json.dumps(payload).encode("utf-8")
+    payload_b64 = base64.urlsafe_b64encode(payload_bytes).rstrip(b"=").decode("ascii")
+    return f"{header_b64}.{payload_b64}.fakesignature"
+
+
+class TestExtractAccountId:
+    """Verify extract_account_id decodes JWT payload and extracts account ID."""
+
+    def test_extracts_account_id_from_openai_profile_claim(self):
+        """Primary path: reads account_id from the OpenAI profile custom claim."""
+        token = _make_jwt(
+            {
+                "sub": "some-sub-id",
+                "https://api.openai.com/profile": {"account_id": "acct_profile_123"},
+            }
+        )
+        assert extract_account_id(token) == "acct_profile_123"
+
+    def test_falls_back_to_sub_claim(self):
+        """Fallback path: returns sub when OpenAI profile claim is absent."""
+        token = _make_jwt({"sub": "sub-fallback-id"})
+        assert extract_account_id(token) == "sub-fallback-id"
+
+    def test_returns_empty_string_for_invalid_jwt(self):
+        """Returns empty string when the token cannot be decoded."""
+        assert extract_account_id("invalid.jwt.token") == ""
+
+    def test_returns_empty_string_for_empty_string_input(self):
+        """Returns empty string for an empty input string."""
+        assert extract_account_id("") == ""

@@ -228,6 +228,57 @@ async def refresh_tokens(refresh_token: str, path: str | None = None) -> dict | 
 
 
 # ---------------------------------------------------------------------------
+# JWT helpers
+# ---------------------------------------------------------------------------
+
+
+def extract_account_id(id_token: str) -> str:
+    """Decode a JWT id_token and extract the account ID.
+
+    Decodes the JWT payload segment without signature verification (the token
+    was just received over HTTPS from the issuer).  Looks for ``account_id``
+    inside the ``https://api.openai.com/profile`` custom claim first; falls
+    back to the standard ``sub`` claim.
+
+    Adds base64url padding if needed before decoding.
+
+    Args:
+        id_token: A JWT string in the form ``header.payload.signature``.
+
+    Returns:
+        The account ID string, or an empty string on any failure (empty input,
+        malformed JWT, missing claims, decode errors).
+    """
+    if not id_token:
+        return ""
+
+    try:
+        parts = id_token.split(".")
+        if len(parts) != 3:
+            return ""
+
+        payload_b64 = parts[1]
+        # Add base64url padding so that len is a multiple of 4.
+        padding_needed = (4 - len(payload_b64) % 4) % 4
+        payload_b64 += "=" * padding_needed
+
+        payload_bytes = base64.urlsafe_b64decode(payload_b64)
+        payload = json.loads(payload_bytes)
+
+        # Primary: OpenAI profile custom claim.
+        profile = payload.get("https://api.openai.com/profile")
+        if isinstance(profile, dict):
+            account_id = profile.get("account_id")
+            if account_id:
+                return str(account_id)
+
+        # Fallback: standard subject claim.
+        return str(payload.get("sub", ""))
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # PKCE helpers (RFC 7636)
 # ---------------------------------------------------------------------------
 
