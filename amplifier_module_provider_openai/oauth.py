@@ -552,7 +552,7 @@ async def start_browser_flow() -> dict:
     auth_url = f"{OAUTH_AUTHORIZE_URL}?{auth_params}"
     webbrowser.open(auth_url)
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         await asyncio.wait_for(
             loop.run_in_executor(None, server.handle_request),

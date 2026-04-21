@@ -159,6 +159,7 @@ class OpenAIProvider:
         self._auth_mode: str = self.config.get("auth_mode", "api_key")
         self._access_token: str | None = None
         self._account_id: str | None = None
+        self._401_retry_attempted: bool = False
 
         # Configuration with sensible defaults (from _constants.py - single source of truth)
         self.base_url = self.config.get(
@@ -1124,9 +1125,7 @@ class OpenAIProvider:
             except openai.AuthenticationError as e:
                 # Subscription mode: attempt a token refresh and retry once.
                 # Guard with _401_retry_attempted to prevent infinite recursion.
-                if self._auth_mode == "subscription" and not getattr(
-                    self, "_401_retry_attempted", False
-                ):
+                if self._auth_mode == "subscription" and not self._401_retry_attempted:
                     self._401_retry_attempted = True
                     tokens = oauth.load_tokens()
                     if tokens and tokens.get("refresh_token"):
