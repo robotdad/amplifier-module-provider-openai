@@ -6,7 +6,12 @@ OAuth/device flow endpoints for OpenAI authentication.
 
 import base64
 import hashlib
+import json
+import logging
+import os
 import secrets
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # OAuth issuer and endpoints
@@ -62,6 +67,64 @@ SUBSCRIPTION_MODELS = [
     "gpt-5.4-nano",
     "gpt-5.3-codex",
 ]
+
+# ---------------------------------------------------------------------------
+# Token storage helpers
+# ---------------------------------------------------------------------------
+
+
+def save_tokens(tokens: dict, path: str | None = None) -> None:
+    """Write tokens as JSON to disk with 0600 permissions.
+
+    Creates parent directories if they do not exist.
+    Defaults to TOKEN_FILE_PATH with ~ expansion when path is None.
+
+    Args:
+        tokens: Dictionary of token data to persist.
+        path: Destination file path. Defaults to TOKEN_FILE_PATH.
+    """
+    if path is None:
+        path = os.path.expanduser(TOKEN_FILE_PATH)
+
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    with open(path, "w") as f:
+        json.dump(tokens, f)
+
+    os.chmod(path, 0o600)
+    logger.debug("Tokens saved to %s", path)
+
+
+def load_tokens(path: str | None = None) -> dict | None:
+    """Read tokens from a JSON file on disk.
+
+    Returns the parsed dict on success.
+    Returns None if the file is missing, empty, or contains malformed JSON.
+
+    Args:
+        path: Source file path. Defaults to TOKEN_FILE_PATH.
+
+    Returns:
+        Token dict on success, None otherwise.
+    """
+    if path is None:
+        path = os.path.expanduser(TOKEN_FILE_PATH)
+
+    try:
+        with open(path) as f:
+            content = f.read()
+        if not content.strip():
+            return None
+        return json.loads(content)
+    except FileNotFoundError:
+        logger.debug("Token file not found: %s", path)
+        return None
+    except json.JSONDecodeError:
+        logger.warning("Malformed JSON in token file: %s", path)
+        return None
+
 
 # ---------------------------------------------------------------------------
 # PKCE helpers (RFC 7636)

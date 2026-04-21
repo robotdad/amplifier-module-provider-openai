@@ -2,6 +2,8 @@
 
 import base64
 import hashlib
+import json
+import stat
 
 from amplifier_module_provider_openai.oauth import (
     CHATGPT_CODEX_BASE_URL,
@@ -19,6 +21,8 @@ from amplifier_module_provider_openai.oauth import (
     SUBSCRIPTION_MODELS,
     TOKEN_FILE_PATH,
     generate_pkce_pair,
+    load_tokens,
+    save_tokens,
 )
 
 
@@ -117,3 +121,68 @@ class TestPKCE:
         pair2 = generate_pkce_pair()
         assert pair1[0] != pair2[0], "Verifiers should be unique across calls"
         assert pair1[1] != pair2[1], "Challenges should be unique across calls"
+
+
+class TestSaveTokens:
+    """Verify save_tokens writes tokens to disk correctly."""
+
+    def test_creates_file_with_correct_content(self, tmp_path):
+        tokens = {"access_token": "abc", "refresh_token": "xyz"}
+        path = str(tmp_path / "tokens.json")
+        save_tokens(tokens, path)
+        with open(path) as f:
+            loaded = json.load(f)
+        assert loaded == tokens
+
+    def test_file_has_0600_permissions(self, tmp_path):
+        tokens = {"access_token": "abc"}
+        path = str(tmp_path / "tokens.json")
+        save_tokens(tokens, path)
+        file_stat = (tmp_path / "tokens.json").stat()
+        permissions = stat.S_IMODE(file_stat.st_mode)
+        assert permissions == 0o600
+
+    def test_creates_parent_directory_if_missing(self, tmp_path):
+        tokens = {"access_token": "abc"}
+        path = str(tmp_path / "nested" / "dir" / "tokens.json")
+        save_tokens(tokens, path)
+        assert (tmp_path / "nested" / "dir" / "tokens.json").exists()
+
+    def test_overwrites_existing_file(self, tmp_path):
+        path = str(tmp_path / "tokens.json")
+        save_tokens({"old": "data"}, path)
+        new_tokens = {"new": "data"}
+        save_tokens(new_tokens, path)
+        with open(path) as f:
+            loaded = json.load(f)
+        assert loaded == new_tokens
+
+
+class TestLoadTokens:
+    """Verify load_tokens reads tokens from disk correctly."""
+
+    def test_returns_dict_for_valid_file(self, tmp_path):
+        tokens = {"access_token": "abc", "refresh_token": "xyz"}
+        path = str(tmp_path / "tokens.json")
+        with open(path, "w") as f:
+            json.dump(tokens, f)
+        result = load_tokens(path)
+        assert result == tokens
+
+    def test_returns_none_for_missing_file(self, tmp_path):
+        path = str(tmp_path / "nonexistent.json")
+        result = load_tokens(path)
+        assert result is None
+
+    def test_returns_none_for_malformed_json(self, tmp_path):
+        path = str(tmp_path / "tokens.json")
+        with open(path, "w") as f:
+            f.write("not valid json {{{")
+        result = load_tokens(path)
+        assert result is None
+
+    def test_returns_none_for_empty_file(self, tmp_path):
+        path = str(tmp_path / "tokens.json")
+        (tmp_path / "tokens.json").touch()
+        result = load_tokens(path)
+        assert result is None
