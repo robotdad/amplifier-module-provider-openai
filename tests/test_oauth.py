@@ -29,6 +29,7 @@ from amplifier_module_provider_openai.oauth import (
     generate_pkce_pair,
     is_token_valid,
     load_tokens,
+    login,
     refresh_tokens,
     save_tokens,
     start_browser_flow,
@@ -647,7 +648,6 @@ class TestBrowserFlow:
     def test_successful_callback_returns_code_and_verifier(self):
         """Successful browser callback returns authorization_code and code_verifier."""
         import io
-        import pytest
 
         captured_handler = {}
         mock_server = MagicMock()
@@ -693,3 +693,99 @@ class TestBrowserFlow:
         ):
             with pytest.raises(OSError):
                 asyncio.run(start_browser_flow())
+
+
+class TestLogin:
+    """Verify login() orchestrates dual-path browser and device code authentication."""
+
+    def test_device_code_wins_when_browser_fails(self):
+        """Device code flow wins when browser raises OSError (e.g. headless/SSH env)."""
+
+        device_result = {
+            "authorization_code": "device_code_123",
+            "code_verifier": "device_verifier_abc",
+        }
+        expected_tokens = {"auth_mode": "oauth", "access_token": "device_token_xyz"}
+
+        with patch(
+            "amplifier_module_provider_openai.oauth.start_browser_flow",
+            new_callable=AsyncMock,
+            side_effect=OSError("Address already in use"),
+        ):
+            with patch(
+                "amplifier_module_provider_openai.oauth.start_device_code_flow",
+                new_callable=AsyncMock,
+                return_value=device_result,
+            ):
+                with patch(
+                    "amplifier_module_provider_openai.oauth.exchange_code_for_tokens",
+                    new_callable=AsyncMock,
+                    return_value=expected_tokens,
+                ) as mock_exchange:
+                    result = asyncio.run(login())
+
+        assert result == expected_tokens
+        mock_exchange.assert_called_once_with(
+            code="device_code_123",
+            code_verifier="device_verifier_abc",
+            redirect_uri=OAUTH_CALLBACK_URL,
+            token_file_path=None,
+        )
+
+    def test_browser_wins_when_faster(self):
+        """Browser flow wins when device code is slow (desktop environment)."""
+        browser_result = {
+            "authorization_code": "browser_code_456",
+            "code_verifier": "browser_verifier_def",
+        }
+        expected_tokens = {"auth_mode": "oauth", "access_token": "browser_token_ghi"}
+
+        async def slow_device():
+            await asyncio.sleep(100)
+            return {
+                "authorization_code": "slow_code",
+                "code_verifier": "slow_verifier",
+            }
+
+        with patch(
+            "amplifier_module_provider_openai.oauth.start_browser_flow",
+            new_callable=AsyncMock,
+            return_value=browser_result,
+        ):
+            with patch(
+                "amplifier_module_provider_openai.oauth.start_device_code_flow",
+                new=slow_device,
+            ):
+                with patch(
+                    "amplifier_module_provider_openai.oauth.exchange_code_for_tokens",
+                    new_callable=AsyncMock,
+                    return_value=expected_tokens,
+                ) as mock_exchange:
+                    result = asyncio.run(login())
+
+        assert result == expected_tokens
+        mock_exchange.assert_called_once_with(
+            code="browser_code_456",
+            code_verifier="browser_verifier_def",
+            redirect_uri=OAUTH_CALLBACK_URL,
+            token_file_path=None,
+        )
+
+    def test_both_fail_raises_runtime_error(self):
+        """RuntimeError raised with error details when both authentication methods fail."""
+        import pytest
+
+        with patch(
+            "amplifier_module_provider_openai.oauth.start_browser_flow",
+            new_callable=AsyncMock,
+            side_effect=OSError("browser port unavailable"),
+        ):
+            with patch(
+                "amplifier_module_provider_openai.oauth.start_device_code_flow",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("device code flow timed out"),
+            ):
+                with pytest.raises(
+                    RuntimeError, match="All authentication methods failed"
+                ):
+                    asyncio.run(login())

@@ -570,3 +570,60 @@ async def start_browser_flow() -> dict:
         "authorization_code": result["code"],
         "code_verifier": code_verifier,
     }
+
+
+# ---------------------------------------------------------------------------
+# Dual-path login orchestration
+# ---------------------------------------------------------------------------
+
+
+async def login(*, token_file_path: str | None = None) -> dict:
+    """Authenticate using browser or device code flow, whichever succeeds first.
+
+    Runs start_browser_flow() and start_device_code_flow() concurrently as
+    asyncio tasks. Uses asyncio.wait with FIRST_COMPLETED to detect the first
+    successful flow. Cancels the losing task. Exchanges the winning
+    authorization code via exchange_code_for_tokens().
+
+    On desktop: browser opens and the user authorizes there; device code flow
+    runs silently in the background and is cancelled when browser succeeds.
+    On headless/SSH: browser fails silently (OSError) and the user uses the
+    device code on their phone.
+
+    Args:
+        token_file_path: Destination file path for token storage.
+            Defaults to TOKEN_FILE_PATH.
+
+    Returns:
+        Token dict from exchange_code_for_tokens().
+
+    Raises:
+        RuntimeError: If all authentication methods fail.
+    """
+    browser_task = asyncio.create_task(start_browser_flow())
+    device_task = asyncio.create_task(start_device_code_flow())
+
+    pending: set = {browser_task, device_task}
+    errors: list[str] = []
+
+    while pending:
+        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            if task.cancelled():
+                continue
+            exc = task.exception()
+            if exc is None:
+                # Winner found — cancel all remaining tasks
+                for t in pending:
+                    t.cancel()
+                result = task.result()
+                return await exchange_code_for_tokens(
+                    code=result["authorization_code"],
+                    code_verifier=result["code_verifier"],
+                    redirect_uri=OAUTH_CALLBACK_URL,
+                    token_file_path=token_file_path,
+                )
+            else:
+                errors.append(str(exc))
+
+    raise RuntimeError(f"All authentication methods failed: {'; '.join(errors)}")
