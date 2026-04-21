@@ -249,6 +249,15 @@ class OpenAIProvider:
             },
             config_fields=[
                 ConfigField(
+                    id="auth_mode",
+                    display_name="Authentication Method",
+                    field_type="choice",
+                    prompt="Select authentication method",
+                    choices=["api_key", "subscription"],
+                    default="api_key",
+                    required=False,
+                ),
+                ConfigField(
                     id="api_key",
                     display_name="API Key",
                     field_type="secret",
