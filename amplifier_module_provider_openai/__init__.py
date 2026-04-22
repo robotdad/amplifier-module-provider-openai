@@ -990,8 +990,9 @@ class OpenAIProvider:
             if max_tool_calls := kwargs.get("max_tool_calls"):
                 params["max_tool_calls"] = max_tool_calls
 
-        # Add truncation parameter for automatic context management
-        if self.truncation:
+        # Add truncation parameter for automatic context management.
+        # ChatGPT subscription backend does NOT support truncation.
+        if self.truncation and self._auth_mode != "subscription":
             params["truncation"] = kwargs.get("truncation", self.truncation)
 
         # Add background mode parameter for long-running requests (deep research)
