@@ -462,11 +462,18 @@ async def start_device_code_flow() -> dict:
         try:
             with urlopen(poll_req) as response:
                 result = json.loads(response.read())
+            logger.warning("Device code poll success response: %s", list(result.keys()))
             # Success — return the authorization code and PKCE verifier.
-            return {
-                "authorization_code": result["authorization_code"],
-                "code_verifier": code_verifier,
-            }
+            # The response may contain authorization_code (for token exchange)
+            # or tokens directly (access_token, refresh_token).
+            if "authorization_code" in result:
+                return {
+                    "authorization_code": result["authorization_code"],
+                    "code_verifier": code_verifier,
+                }
+            else:
+                # Tokens returned directly — skip the exchange step.
+                return {"tokens_direct": True, **result}
         except HTTPError as e:
             body = json.loads(e.read().decode("utf-8", errors="replace"))
             error_code = body.get("error", {}).get("code", "")
@@ -642,6 +649,20 @@ async def login(*, token_file_path: str | None = None) -> dict:
                 for t in pending:
                     t.cancel()
                 result = task.result()
+
+                if result.get("tokens_direct"):
+                    # Device code flow returned tokens directly — save and return.
+                    tokens = {
+                        "auth_mode": "oauth",
+                        "access_token": result.get("access_token", ""),
+                        "refresh_token": result.get("refresh_token", ""),
+                        "id_token": result.get("id_token", ""),
+                        "account_id": extract_account_id(result.get("id_token", "")),
+                        "expires_at": result.get("expires_at", ""),
+                    }
+                    save_tokens(tokens, token_file_path)
+                    return tokens
+
                 return await exchange_code_for_tokens(
                     code=result["authorization_code"],
                     code_verifier=result["code_verifier"],
