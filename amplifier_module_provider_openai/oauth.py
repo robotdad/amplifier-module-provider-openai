@@ -440,39 +440,46 @@ async def start_device_code_flow() -> dict:
     logger.warning("OpenAI OAuth: visit %s and enter code: %s", DEVICE_CODE_VERIFICATION_URL, user_code)
 
     # Step 3: Poll until authorized or an error occurs.
+    from urllib.error import HTTPError
+
+    device_auth_id = device_data.get("device_auth_id", device_code)
+
     while True:
+        await asyncio.sleep(interval)
+
         poll_data = json.dumps(
             {
                 "client_id": OAUTH_CLIENT_ID,
-                "device_auth_id": device_code,
-                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                "device_auth_id": device_auth_id,
+                "user_code": user_code,
             }
         ).encode("utf-8")
 
         poll_req = Request(DEVICE_CODE_TOKEN_URL, data=poll_data, method="POST")
         poll_req.add_header("User-Agent", "amplifier-openai-provider/1.0")
         poll_req.add_header("Content-Type", "application/json")
-        with urlopen(poll_req) as response:
-            result = json.loads(response.read())
 
-        error = result.get("error")
-
-        if error is None:
+        try:
+            with urlopen(poll_req) as response:
+                result = json.loads(response.read())
             # Success — return the authorization code and PKCE verifier.
             return {
                 "authorization_code": result["authorization_code"],
                 "code_verifier": code_verifier,
             }
-        elif error == "authorization_pending":
-            pass  # User hasn't authorized yet; sleep then retry.
-        elif error == "slow_down":
-            interval += 5
-        elif error == "expired_token":
-            raise RuntimeError("Device code expired. Please try again.")
-        else:
-            raise RuntimeError(f"Device code flow error: {error}")
+        except HTTPError as e:
+            body = json.loads(e.read().decode("utf-8", errors="replace"))
+            error_code = body.get("error", {}).get("code", "")
 
-        await asyncio.sleep(interval)
+            if error_code in ("deviceauth_authorization_unknown", "authorization_pending"):
+                continue  # User hasn't authorized yet; sleep then retry.
+            elif error_code == "slow_down":
+                interval += 5
+                continue
+            elif error_code in ("expired_token", "deviceauth_expired"):
+                raise RuntimeError("Device code expired. Please try again.")
+            else:
+                raise RuntimeError(f"Device code flow error: {error_code} - {body}")
 
 
 # ---------------------------------------------------------------------------

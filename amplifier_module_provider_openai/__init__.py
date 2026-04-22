@@ -77,7 +77,6 @@ async def mount(coordinator: ModuleCoordinator, config: dict[str, Any] | None = 
     """
     config = config or {}
     auth_mode = config.get("auth_mode", "api_key")
-    logger.warning("OpenAI provider mount() called with auth_mode=%s, config keys=%s", auth_mode, list(config.keys()))
 
     if auth_mode == "subscription":
         # Load cached tokens from disk.
@@ -469,18 +468,7 @@ class OpenAIProvider:
                 )
             )
 
-        # Append the custom model option
-        models.append(
-            ModelInfo(
-                id="custom",
-                display_name="Custom Model",
-                context_window=200000,
-                max_output_tokens=128000,
-                capabilities=["tools", "streaming"],
-                defaults={"max_tokens": 16384},
-            )
-        )
-
+        # Note: the framework appends a "custom" model entry automatically.
         return sorted(models, key=lambda m: m.display_name.lower())
 
     def _model_id_to_display_name(self, model_id: str) -> str:
