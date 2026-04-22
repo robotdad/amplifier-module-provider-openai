@@ -41,6 +41,7 @@ OAUTH_SCOPES = "openid profile email offline_access"
 
 OAUTH_CALLBACK_PORT = 1455
 OAUTH_CALLBACK_URL = f"http://localhost:{OAUTH_CALLBACK_PORT}/auth/callback"
+DEVICE_CODE_CALLBACK_URL = f"{OAUTH_ISSUER}/deviceauth/callback"
 
 # ---------------------------------------------------------------------------
 # Device code flow endpoints
@@ -684,10 +685,14 @@ async def login(*, token_file_path: str | None = None) -> dict:
                     save_tokens(tokens, token_file_path)
                     return tokens
 
+                # Use the appropriate redirect_uri based on flow type.
+                # Device code flow uses {issuer}/deviceauth/callback.
+                # Browser flow uses localhost callback.
+                flow_redirect = result.get("redirect_uri", DEVICE_CODE_CALLBACK_URL)
                 return await exchange_code_for_tokens(
                     code=result["authorization_code"],
                     code_verifier=result["code_verifier"],
-                    redirect_uri=OAUTH_CALLBACK_URL,
+                    redirect_uri=flow_redirect,
                     token_file_path=token_file_path,
                 )
             else:
