@@ -581,18 +581,20 @@ async def start_browser_flow() -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _is_ssh_session() -> bool:
+    """Detect if we're running inside an SSH session."""
+    return bool(os.environ.get("SSH_CLIENT") or os.environ.get("SSH_TTY"))
+
+
 async def login(*, token_file_path: str | None = None) -> dict:
     """Authenticate using browser or device code flow, whichever succeeds first.
 
-    Runs start_browser_flow() and start_device_code_flow() concurrently as
-    asyncio tasks. Uses asyncio.wait with FIRST_COMPLETED to detect the first
-    successful flow. Cancels the losing task. Exchanges the winning
-    authorization code via exchange_code_for_tokens().
+    If running over SSH, skips the browser flow entirely and uses device code
+    only (browser flow would open on the remote machine's display, not the
+    user's local machine).
 
-    On desktop: browser opens and the user authorizes there; device code flow
-    runs silently in the background and is cancelled when browser succeeds.
-    On headless/SSH: browser fails silently (OSError) and the user uses the
-    device code on their phone.
+    On local desktop: runs both flows concurrently; whichever succeeds first
+    wins and the other is cancelled.
 
     Args:
         token_file_path: Destination file path for token storage.
@@ -604,10 +606,14 @@ async def login(*, token_file_path: str | None = None) -> dict:
     Raises:
         RuntimeError: If all authentication methods fail.
     """
-    browser_task = asyncio.create_task(start_browser_flow())
-    device_task = asyncio.create_task(start_device_code_flow())
+    tasks: list[asyncio.Task] = []
 
-    pending: set = {browser_task, device_task}
+    if not _is_ssh_session():
+        tasks.append(asyncio.create_task(start_browser_flow()))
+
+    tasks.append(asyncio.create_task(start_device_code_flow()))
+
+    pending: set = set(tasks)
     errors: list[str] = []
 
     while pending:
