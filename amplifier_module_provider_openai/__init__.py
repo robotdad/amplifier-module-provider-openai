@@ -94,7 +94,16 @@ async def mount(coordinator: ModuleCoordinator, config: dict[str, Any] | None = 
         if not oauth.is_token_valid(tokens):
             # No valid tokens on disk and refresh failed (or no refresh token) —
             # trigger an interactive login flow.
-            tokens = await oauth.login()
+            try:
+                tokens = await oauth.login()
+            except Exception as exc:
+                import sys
+
+                print(
+                    f"\nOpenAI OAuth login failed: {exc}", file=sys.stderr, flush=True
+                )
+                logger.warning("OpenAI subscription auth failed: %s", exc)
+                return None
 
         # At this point tokens is always a valid dict: oauth.login() raises
         # RuntimeError on all failure paths and never returns None.

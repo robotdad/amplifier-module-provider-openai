@@ -264,7 +264,7 @@ async def exchange_code_for_tokens(
     Raises:
         Exception: Any error from the HTTP request or response parsing propagates up.
     """
-    data = json.dumps(
+    data = urlencode(
         {
             "grant_type": "authorization_code",
             "code": code,
@@ -276,7 +276,7 @@ async def exchange_code_for_tokens(
 
     req = Request(OAUTH_TOKEN_URL, data=data, method="POST")
     req.add_header("User-Agent", "amplifier-openai-provider/1.0")
-    req.add_header("Content-Type", "application/json")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
 
     from urllib.error import HTTPError as _HTTPError
 
