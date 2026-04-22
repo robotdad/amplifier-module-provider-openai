@@ -577,9 +577,9 @@ class OpenAIProvider:
                     # Extract text from message content
                     content = getattr(item, "content", [])
                     for content_item in content:
-                        if (
-                            hasattr(content_item, "type")
-                            and content_item.type in ("output_text", "text")
+                        if hasattr(content_item, "type") and content_item.type in (
+                            "output_text",
+                            "text",
                         ):
                             text = getattr(content_item, "text", "")
                             if text:
@@ -1088,13 +1088,53 @@ class OpenAIProvider:
             """Single API call attempt with SDK → kernel error translation."""
             nonlocal captured_rate_limit_info
             try:
-                # ChatGPT subscription backend: the SDK's streaming accumulator
-                # does not correctly reconstruct the final response from the
-                # backend's SSE events (output array ends up empty despite
-                # tokens being generated). Use non-streaming for subscription.
-                use_streaming = self.use_streaming and self._auth_mode != "subscription"
+                if self._auth_mode == "subscription":
+                    # ChatGPT subscription backend REQUIRES streaming (SSE).
+                    # The SDK's stream.get_final_response() does not correctly
+                    # reconstruct the output array — it ends up empty despite
+                    # tokens being generated. We collect text from SSE events
+                    # manually, get the final response for metadata/usage,
+                    # then patch the collected text into it.
+                    # Ref: codex-backend-sdk, chatgpt-codex-proxy, Letta all
+                    # do manual SSE accumulation for this backend.
+                    async with asyncio.timeout(effective_timeout):
+                        async with self.client.responses.stream(**params) as stream:
+                            collected_text: list[str] = []
+                            async for event in stream:
+                                etype = getattr(event, "type", "")
+                                if etype == "response.output_text.delta":
+                                    collected_text.append(event.delta)
 
-                if use_streaming:
+                            response = await stream.get_final_response()
+
+                            # Patch collected text into response if output is
+                            # empty (the common case for this backend).
+                            if collected_text and not response.output:
+                                from openai.types.responses import (
+                                    ResponseOutputMessage,
+                                    ResponseOutputText,
+                                )
+
+                                text = "".join(collected_text)
+                                patched_msg = ResponseOutputMessage(
+                                    id="msg_patched",
+                                    type="message",
+                                    role="assistant",
+                                    status="completed",
+                                    content=[
+                                        ResponseOutputText(
+                                            type="output_text",
+                                            text=text,
+                                            annotations=[],
+                                            logprobs=None,
+                                        )
+                                    ],
+                                )
+                                response.output = [patched_msg]
+
+                            return response
+
+                elif self.use_streaming:
                     # Streaming path — chunked HTTP transport prevents timeouts on
                     # large context requests.  The complete response is collected before
                     # returning, so callers see no difference in the return value.
@@ -2169,9 +2209,9 @@ class OpenAIProvider:
                     block_content = getattr(block, "content", [])
                     if isinstance(block_content, list):
                         for content_item in block_content:
-                            if (
-                                hasattr(content_item, "type")
-                                and content_item.type in ("output_text", "text")
+                            if hasattr(content_item, "type") and content_item.type in (
+                                "output_text",
+                                "text",
                             ):
                                 text = getattr(content_item, "text", "")
                                 content_blocks.append(TextBlock(text=text))
