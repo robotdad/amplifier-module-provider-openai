@@ -104,7 +104,7 @@ def convert_response_with_accumulated_output(
                     for content_item in block_content:
                         if (
                             hasattr(content_item, "type")
-                            and content_item.type == "output_text"
+                            and content_item.type in ("output_text", "text")
                         ):
                             text = getattr(content_item, "text", "")
                             content_blocks.append(TextBlock(text=text))
@@ -187,7 +187,7 @@ def convert_response_with_accumulated_output(
                 block_content = block.get("content", [])
                 if isinstance(block_content, list):
                     for content_item in block_content:
-                        if content_item.get("type") == "output_text":
+                        if content_item.get("type") in ("output_text", "text"):
                             text = content_item.get("text", "")
                             content_blocks.append(TextBlock(text=text))
                             text_accumulator.append(text)
