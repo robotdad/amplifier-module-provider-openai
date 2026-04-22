@@ -200,6 +200,8 @@ async def refresh_tokens(refresh_token: str, path: str | None = None) -> dict | 
     ).encode("utf-8")
 
     req = Request(OAUTH_TOKEN_URL, data=data, method="POST")
+    req.add_header("User-Agent", "amplifier-openai-provider/1.0")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
 
     try:
         with urlopen(req) as response:
@@ -273,6 +275,8 @@ async def exchange_code_for_tokens(
     ).encode("utf-8")
 
     req = Request(OAUTH_TOKEN_URL, data=data, method="POST")
+    req.add_header("User-Agent", "amplifier-openai-provider/1.0")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
 
     with urlopen(req) as response:
         token_data = json.loads(response.read())
@@ -411,7 +415,7 @@ async def start_device_code_flow() -> dict:
     code_verifier, _ = generate_pkce_pair()
 
     # Step 1: Request a device code and user code from the authorization server.
-    data = urlencode(
+    data = json.dumps(
         {
             "client_id": OAUTH_CLIENT_ID,
             "scope": OAUTH_SCOPES,
@@ -419,12 +423,14 @@ async def start_device_code_flow() -> dict:
     ).encode("utf-8")
 
     req = Request(DEVICE_CODE_USERCODE_URL, data=data, method="POST")
+    req.add_header("User-Agent", "amplifier-openai-provider/1.0")
+    req.add_header("Content-Type", "application/json")
     with urlopen(req) as response:
         device_data = json.loads(response.read())
 
     user_code: str = device_data["user_code"]
-    device_code: str = device_data["device_code"]
-    interval: int = device_data.get("interval", DEVICE_CODE_POLL_INTERVAL)
+    device_code: str = device_data.get("device_code") or device_data.get("device_auth_id", "")
+    interval: int = int(device_data.get("interval", DEVICE_CODE_POLL_INTERVAL))
 
     # Step 2: Prompt the user to authorize via their browser.
     # Use stderr so the message is visible even when the CLI UI has captured stdout.
@@ -435,15 +441,17 @@ async def start_device_code_flow() -> dict:
 
     # Step 3: Poll until authorized or an error occurs.
     while True:
-        poll_data = urlencode(
+        poll_data = json.dumps(
             {
                 "client_id": OAUTH_CLIENT_ID,
-                "device_code": device_code,
+                "device_auth_id": device_code,
                 "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
             }
         ).encode("utf-8")
 
         poll_req = Request(DEVICE_CODE_TOKEN_URL, data=poll_data, method="POST")
+        poll_req.add_header("User-Agent", "amplifier-openai-provider/1.0")
+        poll_req.add_header("Content-Type", "application/json")
         with urlopen(poll_req) as response:
             result = json.loads(response.read())
 

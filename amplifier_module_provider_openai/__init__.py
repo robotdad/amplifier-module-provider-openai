@@ -77,6 +77,7 @@ async def mount(coordinator: ModuleCoordinator, config: dict[str, Any] | None = 
     """
     config = config or {}
     auth_mode = config.get("auth_mode", "api_key")
+    logger.warning("OpenAI provider mount() called with auth_mode=%s, config keys=%s", auth_mode, list(config.keys()))
 
     if auth_mode == "subscription":
         # Load cached tokens from disk.
