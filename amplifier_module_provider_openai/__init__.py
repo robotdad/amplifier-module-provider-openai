@@ -2085,16 +2085,25 @@ class OpenAIProvider:
             # Check if this is a native OpenAI tool (dict with recognized type)
             if isinstance(tool, dict):
                 tool_type = tool.get("type", "")
-                if tool_type in NATIVE_TOOL_TYPES:
-                    # Pass through native tools directly (web_search_preview, file_search, code_interpreter)
+                if tool_type in NATIVE_TOOL_TYPES and self._auth_mode != "subscription":
+                    # Pass through native tools directly (web_search_preview,
+                    # file_search, code_interpreter). ChatGPT subscription
+                    # backend only supports function tools — native tool types
+                    # are not recognized and cause "Unsupported tool type" errors.
                     openai_tools.append(tool)
                     continue
                 # Fall through to handle as function tool if type is "function" or unrecognized
 
             # Handle ToolSpec objects (user-defined function tools)
             if hasattr(tool, "name"):
-                # Special handling for apply_patch with native engine
-                if tool.name == "apply_patch" and self._apply_patch_native:
+                # Special handling for apply_patch with native engine.
+                # ChatGPT subscription backend does NOT support native
+                # apply_patch tool type — fall through to function tool.
+                if (
+                    tool.name == "apply_patch"
+                    and self._apply_patch_native
+                    and self._auth_mode != "subscription"
+                ):
                     openai_tools.append({"type": "apply_patch"})
                     continue
 
