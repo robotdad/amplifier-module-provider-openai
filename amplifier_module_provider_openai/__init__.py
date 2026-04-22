@@ -948,7 +948,8 @@ class OpenAIProvider:
         # Without include=[reasoning.encrypted_content], reasoning token content is lost
         # when store=false (Amplifier's default), causing orphaned reasoning references.
         # Exception: explicit effort="none" suppresses include (caller opted out of reasoning).
-        if not store_enabled:
+        # ChatGPT subscription backend does NOT support the include parameter.
+        if not store_enabled and self._auth_mode != "subscription":
             caps = get_capabilities(model_name)
             active_effort: str | None = None
             if "reasoning" in params:
@@ -982,9 +983,11 @@ class OpenAIProvider:
 
         if tools_list:
             params["tools"] = self._convert_tools_from_request(tools_list)
-            # Add tool-related parameters per Responses API spec
+            # Add tool-related parameters per Responses API spec.
+            # ChatGPT subscription backend does NOT support parallel_tool_calls.
             params["tool_choice"] = kwargs.get("tool_choice", "auto")
-            params["parallel_tool_calls"] = kwargs.get("parallel_tool_calls", True)
+            if self._auth_mode != "subscription":
+                params["parallel_tool_calls"] = kwargs.get("parallel_tool_calls", True)
             # max_tool_calls limits how many tool calls the model can make
             # Important for deep research to prevent excessive searching that consumes token budget
             if max_tool_calls := kwargs.get("max_tool_calls"):
