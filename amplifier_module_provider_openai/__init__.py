@@ -243,10 +243,17 @@ class OpenAIProvider:
                     raise ValueError(
                         "access_token is required for subscription auth mode"
                     )
+                # ChatGPT subscription backend requires additional headers
+                # beyond the standard Bearer token (which goes via api_key).
+                # Ref: Letta chatgpt_oauth_client.py:163-170
                 self._client = AsyncOpenAI(
                     api_key=self._access_token,
                     base_url=oauth.CHATGPT_CODEX_BASE_URL,
-                    default_headers={"ChatGPT-Account-Id": self._account_id or ""},
+                    default_headers={
+                        "ChatGPT-Account-Id": self._account_id or "",
+                        "OpenAI-Beta": "responses=v1",
+                        "OpenAI-Originator": "codex",
+                    },
                     max_retries=0,
                 )
             else:
@@ -892,17 +899,23 @@ class OpenAIProvider:
         if instructions:
             params["instructions"] = instructions
 
-        # ChatGPT subscription backend does NOT support max_output_tokens.
+        # ChatGPT subscription backend does NOT support max_output_tokens
+        # or temperature. These are silently dropped for subscription mode
+        # to avoid "Unsupported parameter" errors from the backend.
+        # Ref: Letta chatgpt_oauth_client.py confirms these exclusions.
         if self._auth_mode != "subscription":
             if request.max_output_tokens:
                 params["max_output_tokens"] = request.max_output_tokens
             elif max_tokens := kwargs.get("max_tokens", self.max_tokens):
                 params["max_output_tokens"] = max_tokens
 
-        if request.temperature is not None:
-            params["temperature"] = request.temperature
-        elif temperature := kwargs.get("temperature", self.temperature):
-            params["temperature"] = temperature
+            if request.temperature is not None:
+                params["temperature"] = request.temperature
+            elif temperature := kwargs.get("temperature", self.temperature):
+                params["temperature"] = temperature
+        else:
+            # Subscription backend requires store=false for stateless operation.
+            params["store"] = False
 
         # Phase 2: Reasoning parameter precedence chain
         # kwargs["reasoning"] > request.reasoning_effort > config default > None
