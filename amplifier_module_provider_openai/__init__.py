@@ -324,6 +324,7 @@ class OpenAIProvider:
                     field_type="secret",
                     prompt="Enter your OpenAI API key",
                     env_var="OPENAI_API_KEY",
+                    required=False,
                 ),
                 ConfigField(
                     id="base_url",
