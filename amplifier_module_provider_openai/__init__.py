@@ -325,6 +325,7 @@ class OpenAIProvider:
                     prompt="Enter your OpenAI API key",
                     env_var="OPENAI_API_KEY",
                     required=False,
+                    show_when={"auth_mode": "api_key"},
                 ),
                 ConfigField(
                     id="base_url",
@@ -334,6 +335,7 @@ class OpenAIProvider:
                     env_var="OPENAI_BASE_URL",
                     required=False,
                     default="https://api.openai.com/v1",
+                    show_when={"auth_mode": "api_key"},
                 ),
                 ConfigField(
                     id="reasoning_effort",
