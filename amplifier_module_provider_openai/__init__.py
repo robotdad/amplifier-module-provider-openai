@@ -892,10 +892,12 @@ class OpenAIProvider:
         if instructions:
             params["instructions"] = instructions
 
-        if request.max_output_tokens:
-            params["max_output_tokens"] = request.max_output_tokens
-        elif max_tokens := kwargs.get("max_tokens", self.max_tokens):
-            params["max_output_tokens"] = max_tokens
+        # ChatGPT subscription backend does NOT support max_output_tokens.
+        if self._auth_mode != "subscription":
+            if request.max_output_tokens:
+                params["max_output_tokens"] = request.max_output_tokens
+            elif max_tokens := kwargs.get("max_tokens", self.max_tokens):
+                params["max_output_tokens"] = max_tokens
 
         if request.temperature is not None:
             params["temperature"] = request.temperature
