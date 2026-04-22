@@ -264,7 +264,7 @@ async def exchange_code_for_tokens(
     Raises:
         Exception: Any error from the HTTP request or response parsing propagates up.
     """
-    data = urlencode(
+    data = json.dumps(
         {
             "grant_type": "authorization_code",
             "code": code,
@@ -276,10 +276,16 @@ async def exchange_code_for_tokens(
 
     req = Request(OAUTH_TOKEN_URL, data=data, method="POST")
     req.add_header("User-Agent", "amplifier-openai-provider/1.0")
-    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    req.add_header("Content-Type", "application/json")
 
-    with urlopen(req) as response:
-        token_data = json.loads(response.read())
+    from urllib.error import HTTPError as _HTTPError
+
+    try:
+        with urlopen(req) as response:
+            token_data = json.loads(response.read())
+    except _HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"Token exchange failed (HTTP {exc.code}): {body}") from exc
 
     id_token = token_data.get("id_token", "")
     account_id = extract_account_id(id_token)
@@ -429,15 +435,26 @@ async def start_device_code_flow() -> dict:
         device_data = json.loads(response.read())
 
     user_code: str = device_data["user_code"]
-    device_code: str = device_data.get("device_code") or device_data.get("device_auth_id", "")
+    device_code: str = device_data.get("device_code") or device_data.get(
+        "device_auth_id", ""
+    )
     interval: int = int(device_data.get("interval", DEVICE_CODE_POLL_INTERVAL))
 
     # Step 2: Prompt the user to authorize via their browser.
     # Use stderr so the message is visible even when the CLI UI has captured stdout.
     import sys
-    print(f"\n\nOpen this URL on any device: {DEVICE_CODE_VERIFICATION_URL}", file=sys.stderr, flush=True)
+
+    print(
+        f"\n\nOpen this URL on any device: {DEVICE_CODE_VERIFICATION_URL}",
+        file=sys.stderr,
+        flush=True,
+    )
     print(f"Enter code: {user_code}\n", file=sys.stderr, flush=True)
-    logger.warning("OpenAI OAuth: visit %s and enter code: %s", DEVICE_CODE_VERIFICATION_URL, user_code)
+    logger.warning(
+        "OpenAI OAuth: visit %s and enter code: %s",
+        DEVICE_CODE_VERIFICATION_URL,
+        user_code,
+    )
 
     # Step 3: Poll until authorized or an error occurs.
     from urllib.error import HTTPError
@@ -462,14 +479,15 @@ async def start_device_code_flow() -> dict:
         try:
             with urlopen(poll_req) as response:
                 result = json.loads(response.read())
-            logger.warning("Device code poll success response: %s", list(result.keys()))
             # Success — return the authorization code and PKCE verifier.
             # The response may contain authorization_code (for token exchange)
             # or tokens directly (access_token, refresh_token).
             if "authorization_code" in result:
+                # Use the server's code_verifier if provided (device code flow),
+                # otherwise fall back to the locally generated one.
                 return {
                     "authorization_code": result["authorization_code"],
-                    "code_verifier": code_verifier,
+                    "code_verifier": result.get("code_verifier", code_verifier),
                 }
             else:
                 # Tokens returned directly — skip the exchange step.
@@ -478,7 +496,10 @@ async def start_device_code_flow() -> dict:
             body = json.loads(e.read().decode("utf-8", errors="replace"))
             error_code = body.get("error", {}).get("code", "")
 
-            if error_code in ("deviceauth_authorization_unknown", "authorization_pending"):
+            if error_code in (
+                "deviceauth_authorization_unknown",
+                "authorization_pending",
+            ):
                 continue  # User hasn't authorized yet; sleep then retry.
             elif error_code == "slow_down":
                 interval += 5
