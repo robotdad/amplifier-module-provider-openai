@@ -606,12 +606,12 @@ async def login(*, token_file_path: str | None = None) -> dict:
     Raises:
         RuntimeError: If all authentication methods fail.
     """
-    tasks: list[asyncio.Task] = []
-
-    if not _is_ssh_session():
-        tasks.append(asyncio.create_task(start_browser_flow()))
-
-    tasks.append(asyncio.create_task(start_device_code_flow()))
+    # During mount(), only use device code flow. Browser flow is inappropriate
+    # here — it opens a browser during session startup which blocks the UI and
+    # can launch on a physical display the user isn't looking at (e.g. SSH into
+    # a Pi with HDMI). Device code works everywhere: the user opens the URL on
+    # any device they have handy.
+    tasks: list[asyncio.Task] = [asyncio.create_task(start_device_code_flow())]
 
     pending: set = set(tasks)
     errors: list[str] = []
