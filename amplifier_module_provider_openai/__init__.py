@@ -1088,7 +1088,13 @@ class OpenAIProvider:
             """Single API call attempt with SDK → kernel error translation."""
             nonlocal captured_rate_limit_info
             try:
-                if self.use_streaming:
+                # ChatGPT subscription backend: the SDK's streaming accumulator
+                # does not correctly reconstruct the final response from the
+                # backend's SSE events (output array ends up empty despite
+                # tokens being generated). Use non-streaming for subscription.
+                use_streaming = self.use_streaming and self._auth_mode != "subscription"
+
+                if use_streaming:
                     # Streaming path — chunked HTTP transport prevents timeouts on
                     # large context requests.  The complete response is collected before
                     # returning, so callers see no difference in the return value.
