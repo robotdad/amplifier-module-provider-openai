@@ -360,6 +360,77 @@ messages = [
 
 **Philosophy**: This is **graceful degradation** following kernel philosophy - errors in other modules (context management) don't crash the provider or kill the user's session.
 
+## Local Development
+
+### Running Unit Tests
+
+```bash
+cd amplifier-module-provider-openai
+uv sync --dev
+uv run pytest tests/ -v
+```
+
+All tests mock the OpenAI API -- no API key needed. Note: `asyncio_mode = "strict"` is set in `pyproject.toml`, so every async test must be decorated with `@pytest.mark.asyncio`.
+
+### Testing with a Live Amplifier Session
+
+To test local changes against a running Amplifier session (e.g., to verify config field changes, new auth flows, or runtime behavior):
+
+**1. Register your local checkout as a source override:**
+
+```bash
+amplifier source add provider-openai /path/to/amplifier-module-provider-openai --local
+```
+
+**2. Force-install so CLI commands use your local code:**
+
+```bash
+amplifier provider install openai --force
+```
+
+This is required because `amplifier source add` only affects session runtime module loading. CLI commands like `provider add` load modules via Python entry points, which still point to the cached version until you force-reinstall.
+
+**3. Configure the provider (if not already configured):**
+
+```bash
+amplifier provider add openai
+```
+
+This should now show config fields from your local code.
+
+**4. Run a session:**
+
+```bash
+amplifier run --provider openai "hello, what model are you?"
+```
+
+**5. Iterate:** Edit your local code and re-run. For code changes that don't affect config fields, step 4 alone is sufficient. If you change config fields or the module's `get_info()` output, re-run step 2.
+
+**6. Clean up when done:**
+
+```bash
+amplifier source remove provider-openai --local
+amplifier provider install openai --force  # restore cached version
+```
+
+### Alternative: Environment Variable Override
+
+For quick one-off testing without modifying settings:
+
+```bash
+AMPLIFIER_MODULE_PROVIDER_OPENAI=$(pwd) amplifier run --provider openai "test"
+```
+
+This is the highest-priority override (Layer 1) and clears when the terminal closes.
+
+### Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| `provider add` shows old config fields | Run `amplifier provider install openai --force` |
+| Changes not reflected at runtime | Clear bytecache: `find . -type d -name __pycache__ -exec rm -rf {} +` |
+| Wrong module loaded | Verify with `amplifier source list` and `amplifier source show provider-openai` |
+
 ## Dependencies
 
 - `amplifier-core>=1.0.0`
