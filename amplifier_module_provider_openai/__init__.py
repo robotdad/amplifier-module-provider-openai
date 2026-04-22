@@ -316,7 +316,6 @@ class OpenAIProvider:
                     prompt="Select authentication method",
                     choices=["api_key", "subscription"],
                     default="api_key",
-                    required=False,
                 ),
                 ConfigField(
                     id="api_key",
@@ -368,6 +367,11 @@ class OpenAIProvider:
         Raises exception if API query fails (no fallback - caller handles empty lists).
         """
         if self._auth_mode == "subscription":
+            return self._list_subscription_models()
+
+        # If we have no API key, we can't query the API. Return the subscription
+        # list as a safe fallback (e.g. during provider add before mount).
+        if not self._api_key:
             return self._list_subscription_models()
 
         # Query OpenAI models API - let exceptions propagate

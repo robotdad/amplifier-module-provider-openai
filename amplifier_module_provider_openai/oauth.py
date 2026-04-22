@@ -427,7 +427,11 @@ async def start_device_code_flow() -> dict:
     interval: int = device_data.get("interval", DEVICE_CODE_POLL_INTERVAL)
 
     # Step 2: Prompt the user to authorize via their browser.
-    print(f"Visit {DEVICE_CODE_VERIFICATION_URL} and enter code: {user_code}")
+    # Use stderr so the message is visible even when the CLI UI has captured stdout.
+    import sys
+    print(f"\n\nOpen this URL on any device: {DEVICE_CODE_VERIFICATION_URL}", file=sys.stderr, flush=True)
+    print(f"Enter code: {user_code}\n", file=sys.stderr, flush=True)
+    logger.warning("OpenAI OAuth: visit %s and enter code: %s", DEVICE_CODE_VERIFICATION_URL, user_code)
 
     # Step 3: Poll until authorized or an error occurs.
     while True:
